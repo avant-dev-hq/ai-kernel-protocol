@@ -1,64 +1,46 @@
 # AKP RAG Primitive Specification
-
 **Version:** 0.1.0 · **Section:** 5 of SPEC.md
 
 ## Ingest Pipeline
-
 ```
-Input text → embed(content) → vector → INSERT storage → observe(latency_ms) → id
-```
-
-## Search Pipelines
-
-### Semantic Search
-```
-Query → embed(query) → cosine_distance(embedding, query_vec) → filter → ORDER BY similarity DESC
+text → embed(content) → vector → INSERT storage → observe(latency) → id
 ```
 
-### Hybrid Search (RECOMMENDED)
+## Semantic Search
 ```
-Query → embed(query) → vector_results (with rank)
-      → plainto_tsquery(query) → bm25_results (with rank)
-      → RRF: score = 1/(60 + rank_vector) + 1/(60 + rank_bm25)
-      → merge + dedup by id → ORDER BY RRF score DESC
+query → embed(query) → cosine_distance → filter(threshold, collection) → ORDER BY similarity
 ```
 
-## Required Operations
-
-| Operation | Endpoint | Conformance |
-|-----------|----------|-------------|
-| Ingest single | `POST /rag/ingest` | REQUIRED |
-| Ingest batch | `POST /rag/ingest/batch` | REQUIRED |
-| Semantic search | `POST /rag/search` | REQUIRED |
-| Hybrid search | `POST /rag/hybrid-search` | RECOMMENDED |
-| List collections | `GET /rag/collections` | REQUIRED |
-| Delete document | `DELETE /rag/:id` | REQUIRED |
-| Observations | `GET /rag/observations` | RECOMMENDED |
+## Hybrid Search (RECOMMENDED)
+```
+query → embed(query) → vector_results[rank]
+      → plainto_tsquery(query) → bm25_results[rank]
+      → RRF: score = 1/(60 + rank_v) + 1/(60 + rank_bm25)
+      → dedup by id → ORDER BY RRF score
+```
 
 ## Observability
 
-Implementations SHOULD record per-search observations:
-
 ```typescript
 interface AKPRagObservation {
-  query_text: string | null;   // null for ingest
+  query_text: string | null;  // null = ingest operation
   collection: string;
   results_count: number;
   top_similarity: number | null;
-  latency_ms: number;           // Wall-clock embed + query time
+  latency_ms: number;          // embed + query wall-clock time
   model_used: string;
-  created_at: ISO8601;
+  created_at: string;
 }
 ```
 
-**Why observability matters:** In retrieval-based AI, quality lives in the invisible middle. A silent retrieval failure corrupts every response downstream. Observing retrieval quality enables systematic improvement without changing the model.
+In retrieval-based AI, quality lives in the invisible middle. A silent retrieval failure corrupts every downstream response.
 
-## pgvector Index Recommendations
+## pgvector Indexes
 
 ```sql
--- Up to ~100k documents
+-- ≤100k docs:
 CREATE INDEX USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
--- 100k+ documents (requires pgvector 0.5+)
+-- >100k docs (pgvector 0.5+):
 CREATE INDEX USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 ```

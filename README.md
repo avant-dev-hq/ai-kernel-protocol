@@ -1,6 +1,6 @@
 # AI Kernel Protocol (AKP)
 
-> **A provider-agnostic intelligence layer built on top of MCP.**
+> **A provider-agnostic intelligence layer built on top of MCP.**  
 > Where MCP gives models context, AKP gives them memory, skills, and intelligence.
 
 [![License: AKP v1.0](https://img.shields.io/badge/License-AKP%20v1.0-blue.svg)](LICENSE)
@@ -32,7 +32,7 @@ Your Application
 │  (This layer — defined by this specification)        │
 └──────────────────────────────────────────────────────┘
        ↓
-┌──────────────────────────────┐
+┌──────────────────────────────────────────────────────┐
 │        Model Context Protocol (MCP)                  │
 │        Tools · Resources · Prompts                   │
 └──────────────────────────────────────────────────────┘
@@ -46,69 +46,51 @@ Your Application
 
 ## The H2O Principle
 
-> Water is H₂O — always. Whether you drink it from a mountain spring, a bottle, or a tap, the molecule is the same.
+> Water is H₂O — always. Whether from a mountain spring, a bottle, or a tap, the molecule is the same.
 
-AKP defines the molecule. Your application calls `POST /chat` and gets streaming intelligence back. Whether the model is Claude Opus, Mistral Large, or Deepseek Reasoner is an infrastructure concern — not a code concern.
+AKP defines the molecule. Change `AI_PROVIDER` — that's it. Zero code changes. Same RAG. Same Memory. Same Skills.
 
 ```bash
-# This is ALL you change to swap your entire inference stack:
 AI_PROVIDER=anthropic   # → Claude Haiku/Sonnet/Opus
 AI_PROVIDER=mistral     # → Mistral Small/Large
 AI_PROVIDER=deepseek    # → DeepSeek Chat/Reasoner
 AI_PROVIDER=openai      # → GPT-4o Mini/4o
 ```
 
-Zero code changes. Same RAG. Same Memory. Same Skills.
-
 ---
 
 ## Core Primitives
 
-AKP defines four intelligence primitives:
-
-### 1. Provider Abstraction
-A three-tier model factory (`fast` / `standard` / `advanced`) that resolves to the correct model for any registered provider. → [`spec/provider.md`](spec/provider.md)
-
-### 2. Memory
-Structured, durable session and message persistence with context window management. → [`spec/memory.md`](spec/memory.md)
-
-### 3. RAG
-Standard interfaces for document ingest, vector semantic search, BM25 full-text search, and hybrid Reciprocal Rank Fusion (RRF) retrieval with observability. → [`spec/rag.md`](spec/rag.md)
-
-### 4. Skills
-A composable tool registry — AKP Skills work with ANY provider. One skill definition, any inference backend. → [`spec/skills.md`](spec/skills.md)
+| Primitive | Spec | Description |
+|-----------|------|-------------|
+| **Provider** | [spec/provider.md](spec/provider.md) | Three-tier model factory (fast/standard/advanced), any provider |
+| **Memory** | [spec/memory.md](spec/memory.md) | Durable session + message persistence with context window management |
+| **RAG** | [spec/rag.md](spec/rag.md) | Ingest, semantic search, hybrid BM25+vector RRF, pipeline observability |
+| **Skills** | [spec/skills.md](spec/skills.md) | Provider-agnostic tool registry, exposed as MCP tools |
 
 ---
 
 ## API Surface
 
 ```http
-# Chat — SSE stream or JSON response
-POST /chat
-
-# RAG
-POST /rag/ingest
-POST /rag/ingest/batch
-POST /rag/search
-POST /rag/hybrid-search      ← BM25 + vector + RRF
-GET  /rag/observations       ← Pipeline observability
-
-# Memory
-POST /memory/sessions
-GET  /memory/sessions?user_id=
+POST /chat                     ← SSE stream or JSON, any provider
+POST /rag/ingest               ← Embed + store document
+POST /rag/ingest/batch         ← Batch embed + store
+POST /rag/search               ← Semantic vector search
+POST /rag/hybrid-search        ← BM25 + vector + RRF
+GET  /rag/observations         ← Pipeline observability
+POST /memory/sessions          ← Create session
 GET  /memory/sessions/:id/messages
 POST /memory/sessions/:id/messages
-
-# Health
-GET  /health
-GET  /health/providers       ← Live provider connectivity
+GET  /health                   ← Provider + DB status
+GET  /health/providers         ← Live provider connectivity
 ```
 
 ---
 
 ## SSE Stream Wire Format
 
-Provider-independent. Same client for every provider:
+Provider-independent. Same iOS client, same web frontend, same CLI — always:
 
 ```
 data: {"type":"text","delta":"..."}
@@ -124,7 +106,7 @@ data: {"type":"error","error":"..."}
 
 ```
 ai-kernel-protocol/
-├── SPEC.md              — Protocol specification
+├── SPEC.md              — Protocol specification v0.1.0
 ├── LICENSE              — Avant.Dev Source Available License v1.0
 ├── spec/
 │   ├── provider.md      — Provider abstraction primitive
@@ -147,12 +129,11 @@ ai-kernel-protocol/
 
 ## Conformance Checklist
 
-An AKP-conformant kernel MUST implement:
-
-- [ ] Three-tier provider factory (`fast` / `standard` / `advanced`)
-- [ ] Provider selection via `AI_PROVIDER` env var, zero code changes
+An AKP-conformant kernel MUST:
+- [ ] Three-tier model factory (fast / standard / advanced)
+- [ ] `AI_PROVIDER` switches provider without code changes
 - [ ] `POST /chat` with SSE streaming and JSON mode
-- [ ] Memory: session + message persistence (durable, not in-memory)
+- [ ] Durable Memory: session + message CRUD + context window
 - [ ] RAG: ingest + semantic search + collections
 - [ ] Skill registry with partial tool selection
 - [ ] `GET /health` reporting active provider
@@ -162,7 +143,7 @@ An AKP-conformant kernel MUST implement:
 
 ## Reference Implementation
 
-The Avant.Dev reference implementation — `acervo-ai-kernel` — is a private, production-grade TypeScript/Express service implementing the full AKP specification. It powers [pn.avant.dev](https://pn.avant.dev) (Policy Navigator) and the native iOS policy intelligence app.
+The Avant.Dev reference implementation — `acervo-ai-kernel` — is a private, production-grade TypeScript/Express service implementing the full AKP spec. It powers [pn.avant.dev](https://pn.avant.dev) and the native iOS policy intelligence app.
 
 The reference implementation is proprietary. This repository defines the open specification it implements.
 
@@ -170,34 +151,30 @@ The reference implementation is proprietary. This repository defines the open sp
 
 ## Why This Exists
 
-AKP was designed to fulfill a concrete operational need: building AI intelligence infrastructure for organizations in developing countries that cannot afford lock-in to a single cloud provider's AI offering.
+AKP was designed by **Erick González Aguilar** (Avant.Dev, Mexico City) to fulfill a concrete need: AI intelligence infrastructure for organizations in developing countries that cannot afford provider lock-in.
 
-Avant.Dev is a signatory of [ITU Partner2Connect Pledge #7528](https://www.itu.int/partner2connect/) — *"LAC AI Governance Policy Intelligence: Bridging the Technical Community Gap in Global Standards Processes"* — active in:
+Avant.Dev holds [ITU Partner2Connect Pledge #7528](https://www.itu.int/partner2connect/) — active in:
 
 **Mexico · Colombia · Brazil · Argentina · Chile · Peru · Ecuador · Costa Rica · Dominican Republic · Panama**
 
-For practitioners in these countries, provider agnosticism is not a preference — it is a requirement for sovereign, cost-effective, and resilient AI operations.
+For practitioners in these countries, provider agnosticism is not a preference — it is a requirement for sovereign, cost-effective, resilient AI.
 
 ---
 
 ## License
 
-| Use Case | License |
-|----------|--------|
-| Personal, research, education | ✅ Free, attribution required |
-| Open-source implementation | ✅ Free, attribution + same license |
-| Internal enterprise use | ✅ Free, attribution required |
+| Use | License |
+|-----|---------|
+| Personal / research / education | ✅ Free + attribution |
+| Open-source implementation | ✅ Free + attribution + same license |
+| Internal enterprise | ✅ Free + attribution |
 | `@avant-dev/akp-core` TypeScript interfaces | ✅ MIT sublicense |
-| Managed service / SaaS offering | ❌ Requires Commercial License |
-| Removing attribution | ❌ Prohibited |
+| Managed service / SaaS | ❌ Commercial License required |
 
-Commercial licensing: [licensing@avant.dev](mailto:licensing@avant.dev)
-
-See [`LICENSE`](LICENSE) for full terms.
+→ [licensing@avant.dev](mailto:licensing@avant.dev) · See [LICENSE](LICENSE) for full terms.
 
 ---
 
 **Designed and authored by Erick González Aguilar**  
-[Avant.Dev](https://avant.dev) · Mexico City · [UN ITU P2C Pledge #7528](https://www.itu.int/partner2connect/)
-
+[Avant.Dev](https://avant.dev) · Mexico City · [ITU P2C Pledge #7528](https://www.itu.int/partner2connect/)  
 © 2026 Erick González Aguilar. All rights reserved.
