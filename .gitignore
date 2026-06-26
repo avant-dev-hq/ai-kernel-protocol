@@ -4,7 +4,6 @@ dist/
 .env.local
 *.env
 .DS_Store
-*.js.map
-# Private add-on tools — see ai-kernel-add-ons (private repo)
+# Private add-on tools (see ai-kernel-add-ons)
 src/tools/custom.ts
 src/tools/custom.js
