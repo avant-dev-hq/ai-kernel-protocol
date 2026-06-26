@@ -143,7 +143,7 @@ An AKP-conformant kernel MUST:
 
 ## Reference Implementation
 
-The Avant.Dev reference implementation — `acervo-ai-kernel` — is a private, production-grade TypeScript/Express service implementing the full AKP spec. It powers [pn.avant.dev](https://pn.avant.dev) and the native iOS policy intelligence app.
+The Avant.Dev reference implementation — `acervo-ai-kernel` — is a private, production-grade TypeScript/Express service implementing the full AKP specification. It is deployed in production, serving institutional intelligence use cases.
 
 The reference implementation is proprietary. This repository defines the open specification it implements.
 
