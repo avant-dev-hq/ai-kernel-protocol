@@ -1,0 +1,342 @@
+---
+title: "RAG Primitive"
+description: "A typed, portable Retrieval-Augmented Generation pipeline — chunk, embed, index, retrieve, rerank."
+icon: "magnifying-glass"
+---
+
+## Overview
+
+The **RAG primitive** defines a typed, wire-compatible pipeline for Retrieval-Augmented Generation. Unlike embedding RAG logic directly into application code, AKP treats RAG as a first-class infrastructure primitive — one that can be configured, swapped, and observed without touching application code.
+
+```
+Document Input
+     │
+     ▼
+┌─────────────┐
+│   Chunker   │  → RagChunk[]
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Embedder  │  → RagEmbedding[] (float32[])
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│  Indexer    │  → Stored in vector store
+└──────┬──────┘
+       │   (at retrieval time)
+       ▼
+┌─────────────┐
+│  Retriever  │  → RagSearchResult[]
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│  Reranker   │  → RagSearchResult[] (sorted by relevance)
+└──────┬──────┘
+       │
+       ▼
+   LLM Context
+```
+
+---
+
+## Core Types
+
+```typescript
+import type {
+  RagDocument,
+  RagChunk,
+  RagEmbedding,
+  RagSearchResult,
+  RagPipelineConfig,
+  ChunkerConfig,
+  EmbedderConfig,
+  VectorStoreConfig,
+  RerankerConfig,
+} from "@avant-dev/akp-core";
+
+interface RagDocument {
+  id: string;
+  content: string;
+  mimeType?: "text/plain" | "text/markdown" | "text/html" | "application/pdf";
+  metadata?: Record<string, unknown>;
+  source?: string;          // URL or file path
+}
+
+interface RagChunk {
+  id: string;
+  documentId: string;
+  content: string;
+  index: number;            // Position in original document
+  startChar: number;
+  endChar: number;
+  metadata?: Record<string, unknown>;
+}
+
+interface RagEmbedding {
+  chunkId: string;
+  vector: number[];         // float32 embedding
+  model: string;            // e.g., "text-embedding-3-small"
+  dimensions: number;       // e.g., 1536
+}
+
+interface RagSearchResult {
+  chunk: RagChunk;
+  score: number;            // Cosine similarity 0–1
+  rerankedScore?: number;   // Score after reranking (if reranker configured)
+  document?: Partial<RagDocument>;
+}
+```
+
+---
+
+## Pipeline Configuration
+
+```typescript
+const kernel = createKernel({
+  rag: {
+    // Chunking strategy
+    chunker: {
+      strategy: "recursive",          // "fixed" | "recursive" | "semantic" | "markdown"
+      chunkSize: 512,                 // tokens
+      chunkOverlap: 64,               // tokens
+      separators: ["\n\n", "\n", " "],
+    },
+
+    // Embedding model
+    embedder: {
+      provider: "openai",
+      model: "text-embedding-3-small",
+      dimensions: 1536,
+      batchSize: 100,                 // Documents per embedding API call
+    },
+
+    // Vector store
+    vectorStore: {
+      adapter: "pgvector",
+      url: process.env.DATABASE_URL!,
+      table: "akp_embeddings",
+      dimensions: 1536,
+      indexType: "ivfflat",           // "ivfflat" | "hnsw"
+    },
+
+    // Reranker (optional — improves precision)
+    reranker: {
+      provider: "cohere",
+      model: "rerank-english-v3.0",
+      apiKey: process.env.COHERE_API_KEY,
+      topN: 5,
+    },
+  },
+});
+```
+
+---
+
+## Ingesting Documents
+
+```typescript
+// Ingest a single document
+await kernel.rag.ingest({
+  document: {
+    id: "doc-001",
+    content: "# Introduction to AKP\n\nThe AI Kernel Protocol is...",
+    mimeType: "text/markdown",
+    source: "https://akp.avant.dev/introduction",
+    metadata: { category: "docs", version: "0.1" },
+  },
+});
+
+// Ingest multiple documents (batched automatically)
+const documents: RagDocument[] = [
+  { id: "policy-001", content: "Privacy policy...", mimeType: "text/plain" },
+  { id: "policy-002", content: "Terms of service...", mimeType: "text/plain" },
+  { id: "faq-001", content: "## FAQ\n\n**Q: What is AKP?**...", mimeType: "text/markdown" },
+];
+
+const result = await kernel.rag.ingestBatch({ documents });
+console.log(`Ingested ${result.chunksCreated} chunks from ${result.documentsProcessed} docs`);
+// { chunksCreated: 47, documentsProcessed: 3, embeddingsGenerated: 47 }
+
+// Ingest from a URL
+await kernel.rag.ingestUrl({
+  url: "https://example.com/technical-docs.pdf",
+  metadata: { source: "external", topic: "technical" },
+});
+```
+
+---
+
+## Retrieval
+
+```typescript
+// Simple semantic search
+const results = await kernel.rag.search({
+  query: "How does the H2O memory principle work?",
+  limit: 5,
+  minScore: 0.7,
+});
+
+for (const result of results) {
+  console.log(`[${result.score.toFixed(3)}] ${result.chunk.content.slice(0, 100)}...`);
+}
+
+// Filtered search
+const filteredResults = await kernel.rag.search({
+  query: "provider routing strategies",
+  limit: 10,
+  filter: {
+    metadata: { category: "docs" },
+    documentIds: ["doc-001", "doc-002"],  // Restrict to specific docs
+  },
+});
+
+// Hybrid search (semantic + keyword BM25)
+const hybridResults = await kernel.rag.search({
+  query: "AKP memory tiers",
+  limit: 10,
+  mode: "hybrid",          // "semantic" | "keyword" | "hybrid"
+  hybridAlpha: 0.7,        // 0 = keyword only, 1 = semantic only
+});
+```
+
+---
+
+## RAG-Augmented Completions
+
+The most common pattern: retrieve relevant chunks, inject them into context, then complete:
+
+```typescript
+// High-level: let AKP handle the full RAG-augmented completion
+const response = await kernel.provider.complete({
+  messages: [{ role: "user", content: "What are the AKP memory tiers?" }],
+  rag: {
+    enabled: true,
+    query: "AKP memory tiers H2O principle",  // Optional: custom retrieval query
+    limit: 5,
+    minScore: 0.65,
+    // Prompt template for injecting retrieved context
+    contextTemplate: "Use the following documentation to answer the question:\n\n{context}\n\nQuestion: {question}",
+  },
+});
+
+// Low-level: manually compose the RAG pipeline
+const chunks = await kernel.rag.search({ query: "memory tiers", limit: 5 });
+const context = chunks.map(r => r.chunk.content).join("\n\n---\n\n");
+
+const response2 = await kernel.provider.complete({
+  messages: [
+    {
+      role: "system",
+      content: `You are an AKP documentation assistant. Use this context:\n\n${context}`,
+    },
+    { role: "user", content: "What are the AKP memory tiers?" },
+  ],
+});
+```
+
+---
+
+## Vector Store Adapters
+
+AKP supports the following vector store adapters:
+
+| Adapter | Key | Self-Hosted | Managed |
+|---------|-----|-------------|---------|
+| pgvector | `"pgvector"` | ✅ | Neon, Supabase, Railway |
+| Pinecone | `"pinecone"` | ❌ | ✅ |
+| Qdrant | `"qdrant"` | ✅ | ✅ |
+| Chroma | `"chroma"` | ✅ | ❌ |
+| Weaviate | `"weaviate"` | ✅ | ✅ |
+| In-memory | `"memory"` | ✅ (dev only) | ❌ |
+
+```typescript
+// pgvector example
+const kernel = createKernel({
+  rag: {
+    vectorStore: {
+      adapter: "pgvector",
+      url: process.env.DATABASE_URL!,
+    },
+  },
+});
+
+// Pinecone example
+const kernel2 = createKernel({
+  rag: {
+    vectorStore: {
+      adapter: "pinecone",
+      apiKey: process.env.PINECONE_API_KEY!,
+      index: "my-akp-index",
+      namespace: "production",
+    },
+  },
+});
+```
+
+---
+
+## Wire Format
+
+### `POST /v1/rag/ingest`
+
+```json
+{
+  "document": {
+    "id": "doc-001",
+    "content": "# Introduction\n\nAKP is...",
+    "mimeType": "text/markdown",
+    "metadata": { "category": "docs" }
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "documentId": "doc-001",
+  "chunksCreated": 8,
+  "embeddingsGenerated": 8
+}
+```
+
+### `POST /v1/rag/search`
+
+```json
+{
+  "query": "How does memory promotion work?",
+  "limit": 5,
+  "minScore": 0.7
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "score": 0.891,
+      "chunk": {
+        "id": "chunk-abc",
+        "documentId": "doc-001",
+        "content": "AKP tracks access frequency and automatically promotes...",
+        "index": 3,
+        "startChar": 1024,
+        "endChar": 1536
+      }
+    }
+  ],
+  "query": "How does memory promotion work?",
+  "totalResults": 1,
+  "latencyMs": 23
+}
+```
+
+---
+
+<Snippet file="footer.mdx" />

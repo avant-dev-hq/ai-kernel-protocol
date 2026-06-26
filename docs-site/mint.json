@@ -1,0 +1,148 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "AI Kernel Protocol",
+  "logo": {
+    "light": "/logo/akp-light.svg",
+    "dark": "/logo/akp-dark.svg",
+    "href": "https://akp.avant.dev"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#6366f1",
+    "light": "#818cf8",
+    "dark": "#4f46e5",
+    "background": {
+      "light": "#ffffff",
+      "dark": "#0a0a0f"
+    },
+    "anchors": {
+      "from": "#6366f1",
+      "to": "#8b5cf6"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/avant-dev-hq/ai-kernel-protocol"
+    },
+    {
+      "name": "Avant.Dev",
+      "url": "https://avant.dev"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Get Started",
+    "url": "/pages/quickstart"
+  },
+  "tabs": [
+    {
+      "name": "Documentation",
+      "url": "pages"
+    },
+    {
+      "name": "Specification",
+      "url": "pages/spec"
+    },
+    {
+      "name": "Guides",
+      "url": "pages/guides"
+    },
+    {
+      "name": "Reference",
+      "url": "pages/reference"
+    }
+  ],
+  "anchors": [
+    {
+      "name": "Specification",
+      "icon": "book-open",
+      "url": "pages/spec"
+    },
+    {
+      "name": "GitHub",
+      "icon": "github",
+      "url": "https://github.com/avant-dev-hq/ai-kernel-protocol"
+    },
+    {
+      "name": "Avant.Dev",
+      "icon": "building",
+      "url": "https://avant.dev"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        "pages/introduction",
+        "pages/quickstart",
+        "pages/mcp-relationship"
+      ]
+    },
+    {
+      "group": "Specification",
+      "pages": [
+        "pages/spec/overview",
+        "pages/spec/provider",
+        "pages/spec/memory",
+        "pages/spec/rag",
+        "pages/spec/skills",
+        "pages/spec/wire-format"
+      ]
+    },
+    {
+      "group": "Guides",
+      "pages": [
+        "pages/guides/first-implementation",
+        "pages/guides/custom-skills",
+        "pages/guides/hybrid-rag",
+        "pages/guides/ios-swift-client"
+      ]
+    },
+    {
+      "group": "Reference",
+      "pages": [
+        "pages/reference/api",
+        "pages/reference/typescript-sdk",
+        "pages/reference/environment-vars"
+      ]
+    },
+    {
+      "group": "Compliance",
+      "pages": [
+        "pages/compliance"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/avant-dev-hq/ai-kernel-protocol",
+    "website": "https://avant.dev"
+  },
+  "modeToggle": {
+    "default": "dark",
+    "isHidden": false
+  },
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true,
+    "raiseIssue": true
+  },
+  "search": {
+    "prompt": "Search AKP docs..."
+  },
+  "metadata": {
+    "og:title": "AI Kernel Protocol — Documentation",
+    "og:description": "The open protocol for composable AI infrastructure — Memory, RAG, Skills, and Provider abstraction built on top of MCP.",
+    "og:image": "https://akp.avant.dev/og-image.png",
+    "twitter:card": "summary_large_image",
+    "twitter:title": "AI Kernel Protocol",
+    "twitter:description": "Open protocol for composable AI infrastructure"
+  },
+  "font": {
+    "headings": {
+      "family": "Inter"
+    },
+    "body": {
+      "family": "Inter"
+    }
+  }
+}

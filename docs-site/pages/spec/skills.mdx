@@ -1,0 +1,372 @@
+---
+title: "Skills Primitive"
+description: "Composable, versioned AI capabilities — define, register, discover, and invoke skills with streaming support."
+icon: "bolt"
+---
+
+## Overview
+
+**Skills** are the unit of reusable AI capability in AKP. A Skill wraps an AI-powered operation — a prompt + logic + structured output — into a versioned, discoverable, and composable function. Skills are the difference between an AI prototype and a production system.
+
+```
+Application
+    │
+    ▼
+kernel.skills.invoke("summarize", { text: "..." })
+    │
+    ▼
+Skills Registry
+    │  (lookup "summarize@1.0.0")
+    ▼
+Skill Execution Engine
+    │  (validates input, injects context, calls provider)
+    ▼
+SkillOutput<{ bullets: string[] }>
+```
+
+---
+
+## Core Types
+
+```typescript
+import type {
+  SkillDefinition,
+  SkillInput,
+  SkillOutput,
+  SkillExecutionContext,
+  SkillStreamChunk,
+  SkillInvokeOptions,
+} from "@avant-dev/akp-core";
+
+interface SkillDefinition<TInput = unknown, TOutput = unknown> {
+  name: string;                     // Unique skill name (snake_case)
+  version: string;                  // Semver: "1.0.0"
+  description: string;
+  tags?: string[];
+  input: JSONSchema;                // JSON Schema for input validation
+  output: JSONSchema;               // JSON Schema for structured output
+  streaming?: boolean;              // Whether this skill supports streaming
+  // The execution function
+  execute: (ctx: SkillExecutionContext<TInput>) => Promise<TOutput>;
+  // Optional streaming execution
+  stream?: (ctx: SkillExecutionContext<TInput>) => AsyncIterable<SkillStreamChunk>;
+}
+
+interface SkillExecutionContext<TInput = unknown> {
+  input: TInput;
+  kernel: KernelClient;             // Access to all primitives
+  sessionId?: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  signal?: AbortSignal;             // For cancellation
+}
+
+interface SkillStreamChunk {
+  type: "delta" | "thinking" | "metadata" | "done";
+  delta?: string;
+  thinking?: string;
+  metadata?: Record<string, unknown>;
+  result?: unknown;                 // Final result (type === "done")
+}
+```
+
+---
+
+## Defining a Skill
+
+```typescript
+import { defineSkill } from "@avant-dev/akp-core";
+
+// Simple summarization skill
+export const summarizeSkill = defineSkill({
+  name: "summarize",
+  version: "1.0.0",
+  description: "Summarizes text into structured bullet points.",
+  tags: ["text", "summarization"],
+  input: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "Text to summarize", minLength: 1 },
+      maxBullets: { type: "number", minimum: 1, maximum: 20, default: 5 },
+      language: { type: "string", enum: ["en", "es", "pt", "fr"], default: "en" },
+    },
+    required: ["text"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      bullets: { type: "array", items: { type: "string" } },
+      wordCount: { type: "number" },
+      language: { type: "string" },
+    },
+    required: ["bullets"],
+  },
+
+  async execute({ input, kernel }) {
+    const response = await kernel.provider.complete({
+      messages: [
+        {
+          role: "system",
+          content: `You are a summarization assistant. Respond in ${input.language ?? "en"}.`,
+        },
+        {
+          role: "user",
+          content: `Summarize the following text into at most ${input.maxBullets ?? 5} concise bullet points:\n\n${input.text}`,
+        },
+      ],
+      responseFormat: {
+        type: "json_schema",
+        schema: {
+          type: "object",
+          properties: {
+            bullets: { type: "array", items: { type: "string" } },
+          },
+          required: ["bullets"],
+        },
+      },
+    });
+
+    return {
+      bullets: response.parsed.bullets,
+      wordCount: input.text.split(/\s+/).length,
+      language: input.language ?? "en",
+    };
+  },
+});
+```
+
+---
+
+## Streaming Skills
+
+```typescript
+export const analyzeSkill = defineSkill({
+  name: "analyze_document",
+  version: "1.0.0",
+  description: "Analyzes a document and streams structured insights.",
+  streaming: true,
+  input: {
+    type: "object",
+    properties: {
+      document: { type: "string" },
+      aspects: {
+        type: "array",
+        items: { type: "string", enum: ["sentiment", "topics", "entities", "risks"] },
+        default: ["topics", "entities"],
+      },
+    },
+    required: ["document"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      sentiment: { type: "string", enum: ["positive", "negative", "neutral"] },
+      topics: { type: "array", items: { type: "string" } },
+      entities: { type: "array", items: { type: "string" } },
+      risks: { type: "array", items: { type: "string" } },
+    },
+  },
+
+  async execute({ input, kernel }) {
+    // Non-streaming fallback
+    const response = await kernel.provider.complete({
+      messages: [
+        {
+          role: "user",
+          content: `Analyze this document for: ${input.aspects?.join(", ")}.\n\n${input.document}`,
+        },
+      ],
+      responseFormat: { type: "json_schema", schema: { /* ... */ } },
+    });
+    return response.parsed;
+  },
+
+  async *stream({ input, kernel }) {
+    const stream = kernel.provider.stream({
+      messages: [
+        {
+          role: "user",
+          content: `Analyze this document for: ${input.aspects?.join(", ")}. Think step by step.\n\n${input.document}`,
+        },
+      ],
+    });
+
+    for await (const chunk of stream) {
+      if (chunk.type === "content_delta" && chunk.delta) {
+        yield { type: "delta", delta: chunk.delta };
+      }
+    }
+    // Final structured result
+    yield { type: "done", result: { /* parsed result */ } };
+  },
+});
+```
+
+---
+
+## Registering and Invoking Skills
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+import { summarizeSkill, analyzeSkill } from "./skills";
+
+const kernel = createKernel({ /* ... */ });
+
+// Register skills
+kernel.skills.register(summarizeSkill);
+kernel.skills.register(analyzeSkill);
+
+// Invoke a skill
+const result = await kernel.skills.invoke("summarize", {
+  text: "The AI Kernel Protocol provides a composable infrastructure layer...",
+  maxBullets: 3,
+  language: "es",
+});
+
+console.log(result.bullets);
+// ["AKP es un protocolo de infraestructura composable para IA",
+//  "Define cuatro primitivas: Provider, Memory, RAG y Skills",
+//  "Construido sobre MCP con compatibilidad nativa"]
+
+// Invoke with streaming
+const stream = kernel.skills.stream("analyze_document", {
+  document: "Q4 earnings report...",
+  aspects: ["sentiment", "topics"],
+});
+
+for await (const chunk of stream) {
+  if (chunk.type === "delta") process.stdout.write(chunk.delta ?? "");
+  if (chunk.type === "done") console.log("\nResult:", chunk.result);
+}
+```
+
+---
+
+## Skill Composition
+
+Skills can call other skills, creating composable pipelines:
+
+```typescript
+export const researchSkill = defineSkill({
+  name: "research_and_summarize",
+  version: "1.0.0",
+  description: "Retrieves relevant documents and summarizes findings.",
+  input: {
+    type: "object",
+    properties: {
+      topic: { type: "string" },
+      maxSources: { type: "number", default: 5 },
+    },
+    required: ["topic"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      summary: { type: "array", items: { type: "string" } },
+      sources: { type: "array", items: { type: "string" } },
+    },
+    required: ["summary", "sources"],
+  },
+
+  async execute({ input, kernel }) {
+    // 1. Search the RAG index
+    const ragResults = await kernel.rag.search({
+      query: input.topic,
+      limit: input.maxSources ?? 5,
+      minScore: 0.65,
+    });
+
+    const context = ragResults.map(r => r.chunk.content).join("\n\n---\n\n");
+
+    // 2. Invoke the summarize skill on the retrieved context
+    const summary = await kernel.skills.invoke("summarize", {
+      text: context,
+      maxBullets: 7,
+    });
+
+    return {
+      summary: summary.bullets,
+      sources: ragResults.map(r => r.chunk.documentId),
+    };
+  },
+});
+```
+
+---
+
+## Skill Discovery
+
+```typescript
+// List all registered skills
+const skills = await kernel.skills.list();
+// [
+//   { name: "summarize", version: "1.0.0", tags: ["text"] },
+//   { name: "analyze_document", version: "1.0.0", streaming: true },
+//   { name: "research_and_summarize", version: "1.0.0" },
+// ]
+
+// Get skill metadata
+const meta = await kernel.skills.get("summarize");
+console.log(meta.description);
+console.log(meta.input);  // JSON Schema
+
+// Check if skill exists
+const exists = await kernel.skills.has("summarize@1.0.0");
+```
+
+---
+
+## Wire Format
+
+### `GET /v1/skills`
+
+Response:
+
+```json
+{
+  "skills": [
+    {
+      "name": "summarize",
+      "version": "1.0.0",
+      "description": "Summarizes text into structured bullet points.",
+      "streaming": false,
+      "tags": ["text", "summarization"],
+      "inputSchema": { "type": "object", "properties": { "text": { "type": "string" } } }
+    }
+  ]
+}
+```
+
+### `POST /v1/skills/summarize/invoke`
+
+```json
+{
+  "input": { "text": "The AI Kernel Protocol...", "maxBullets": 3 },
+  "sessionId": "session-abc123"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "skill": "summarize",
+  "version": "1.0.0",
+  "output": {
+    "bullets": ["AKP defines four primitives...", "Built on top of MCP...", "Open source under SAL v1.0"],
+    "wordCount": 412,
+    "language": "en"
+  },
+  "latencyMs": 847,
+  "usage": { "inputTokens": 512, "outputTokens": 128, "costUsd": 0.000234 }
+}
+```
+
+### `POST /v1/skills/analyze_document/stream`
+
+Returns an SSE stream. See the [Wire Format](/pages/spec/wire-format) spec for SSE event format.
+
+---
+
+<Snippet file="footer.mdx" />

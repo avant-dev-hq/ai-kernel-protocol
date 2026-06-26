@@ -1,0 +1,437 @@
+---
+title: "Wire Format"
+description: "AKP REST API wire format: endpoints, SSE streaming protocol, authentication, error codes, and rate limiting."
+icon: "server"
+---
+
+## Overview
+
+AKP uses a **REST + Server-Sent Events (SSE)** wire format over HTTP/1.1 or HTTP/2. All endpoints are versioned under `/v1/`. Streaming responses use the W3C SSE standard.
+
+Base URL: `https://your-kernel.example.com` (or `http://localhost:8080` for local development)
+
+---
+
+## Authentication
+
+All requests require a bearer token in the `Authorization` header. The format is:
+`Authorization: [Bearer] <your-api-key>` — where `<your-api-key>` is one of your kernel API keys.
+
+Example (replace `<your-api-key>` with an `akp_sk_live_*` key):
+
+```
+Authorization: [Bearer] <akp_sk_live_your_key_here>
+```
+
+AKP supports two token types:
+
+| Type | Prefix | Scope |
+|------|--------|-------|
+| Secret key | `akp_sk_live_` | Full access — server-side only |
+| Publishable key | `akp_pk_live_` | Read-only — safe for client-side |
+| Development key | `akp_sk_dev_` | Full access — local dev only |
+
+---
+
+## Request Format
+
+All request bodies use JSON (`Content-Type: application/json`). All responses use JSON.
+
+Standard request headers:
+
+```http
+POST /v1/provider/complete HTTP/1.1
+Host: your-kernel.example.com
+Authorization: [Bearer] <akp_sk_live_your_key_here>
+Content-Type: application/json
+Accept: application/json
+X-AKP-Session-Id: session-abc123    (optional)
+X-AKP-User-Id: user-42              (optional)
+X-AKP-Request-Id: req-xyz           (optional — for idempotency)
+```
+
+---
+
+## Provider Endpoints
+
+### `POST /v1/provider/complete`
+
+Non-streaming completion.
+
+**Request:**
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "What is AKP?" }
+  ],
+  "model": "claude-opus-4-5",
+  "temperature": 0.7,
+  "maxTokens": 1024,
+  "responseFormat": { "type": "text" }
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "id": "resp_01abc",
+  "model": "claude-opus-4-5",
+  "provider": "anthropic",
+  "content": "AKP (AI Kernel Protocol) is an open infrastructure protocol...",
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 28,
+    "outputTokens": 142,
+    "totalTokens": 170,
+    "costUsd": 0.00392
+  },
+  "latencyMs": 1240
+}
+```
+
+---
+
+### `POST /v1/provider/stream`
+
+Streaming completion via SSE.
+
+**Request:** Same as `/complete` but set `"stream": true` (or use this dedicated endpoint).
+
+**Response `200 OK`** with `Content-Type: text/event-stream`:
+
+```
+data: {"id":"resp_01abc","type":"content_delta","delta":"AKP "}
+
+data: {"id":"resp_01abc","type":"content_delta","delta":"is an open "}
+
+data: {"id":"resp_01abc","type":"content_delta","delta":"infrastructure protocol..."}
+
+data: {"id":"resp_01abc","type":"usage","usage":{"inputTokens":28,"outputTokens":142,"costUsd":0.00392}}
+
+data: {"id":"resp_01abc","type":"stop","stopReason":"end_turn"}
+
+data: [DONE]
+```
+
+**SSE Event Schema:**
+
+```typescript
+type SseEvent =
+  | { id: string; type: "content_delta"; delta: string }
+  | { id: string; type: "tool_call_delta"; toolCallDelta: { id: string; name?: string; argumentsDelta?: string } }
+  | { id: string; type: "usage"; usage: { inputTokens: number; outputTokens: number; costUsd: number } }
+  | { id: string; type: "stop"; stopReason: string }
+  | "[DONE]";
+```
+
+---
+
+## Memory Endpoints
+
+### `POST /v1/memory/write`
+
+```json
+{
+  "tier": "warm",
+  "key": "session:abc123:context",
+  "value": { "topic": "AKP docs" },
+  "ttl": 3600,
+  "tags": ["session"]
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "ok": true,
+  "key": "session:abc123:context",
+  "tier": "warm",
+  "expiresAt": "2025-01-15T15:00:00Z"
+}
+```
+
+---
+
+### `GET /v1/memory/read`
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | ✅ | Memory key to read |
+| `tiers` | string | ❌ | Comma-separated tiers: `hot,warm,cold` |
+
+**Response `200 OK`:**
+
+```json
+{
+  "found": true,
+  "entry": {
+    "key": "session:abc123:context",
+    "value": { "topic": "AKP docs" },
+    "tier": "warm",
+    "createdAt": "2025-01-15T14:00:00Z",
+    "expiresAt": "2025-01-15T15:00:00Z",
+    "accessCount": 2
+  }
+}
+```
+
+**Response `200 OK` (not found):**
+
+```json
+{ "found": false }
+```
+
+---
+
+### `POST /v1/memory/search`
+
+Semantic search over memory entries.
+
+```json
+{
+  "query": "user travel preferences",
+  "tiers": ["warm", "cold"],
+  "limit": 5,
+  "minScore": 0.7
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "results": [
+    {
+      "score": 0.891,
+      "entry": {
+        "key": "user:42:travel-prefs",
+        "value": { "preferredClass": "business", "seatPreference": "aisle" },
+        "tier": "cold"
+      }
+    }
+  ]
+}
+```
+
+---
+
+### `DELETE /v1/memory/delete`
+
+```json
+{ "key": "session:abc123:context", "tier": "warm" }
+```
+
+**Response `200 OK`:**
+
+```json
+{ "ok": true, "deleted": 1 }
+```
+
+---
+
+## RAG Endpoints
+
+### `POST /v1/rag/ingest`
+
+```json
+{
+  "document": {
+    "id": "doc-001",
+    "content": "# Introduction\n\nAKP is...",
+    "mimeType": "text/markdown",
+    "metadata": { "category": "docs" }
+  }
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "ok": true,
+  "documentId": "doc-001",
+  "chunksCreated": 8,
+  "embeddingsGenerated": 8
+}
+```
+
+---
+
+### `POST /v1/rag/search`
+
+```json
+{
+  "query": "memory promotion rules",
+  "limit": 5,
+  "minScore": 0.7,
+  "mode": "semantic"
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "results": [
+    {
+      "score": 0.912,
+      "chunk": {
+        "id": "chunk-abc",
+        "documentId": "doc-001",
+        "content": "AKP tracks access frequency and automatically promotes...",
+        "index": 3,
+        "startChar": 1024,
+        "endChar": 1536
+      }
+    }
+  ],
+  "totalResults": 1,
+  "latencyMs": 18
+}
+```
+
+---
+
+## Skills Endpoints
+
+### `GET /v1/skills`
+
+Lists all registered skills. No body required.
+
+**Response `200 OK`:**
+
+```json
+{
+  "skills": [
+    {
+      "name": "summarize",
+      "version": "1.0.0",
+      "description": "Summarizes text into bullet points.",
+      "streaming": false,
+      "tags": ["text"]
+    }
+  ]
+}
+```
+
+---
+
+### `POST /v1/skills/{name}/invoke`
+
+```json
+{
+  "input": { "text": "The AI Kernel Protocol...", "maxBullets": 3 },
+  "sessionId": "session-abc123"
+}
+```
+
+**Response `200 OK`:**
+
+```json
+{
+  "ok": true,
+  "skill": "summarize",
+  "version": "1.0.0",
+  "output": { "bullets": ["..."], "wordCount": 412, "language": "en" },
+  "latencyMs": 847,
+  "usage": { "inputTokens": 512, "outputTokens": 128, "costUsd": 0.000234 }
+}
+```
+
+---
+
+### `POST /v1/skills/{name}/stream`
+
+Returns SSE stream. Same SSE format as provider streaming, with an additional `result` field on the `done` event:
+
+```
+data: {"type":"delta","delta":"Analyzing document..."}
+
+data: {"type":"delta","delta":" Found 3 key topics."}
+
+data: {"type":"done","result":{"topics":["AKP","memory","RAG"]}}
+
+data: [DONE]
+```
+
+---
+
+## Error Format
+
+All errors use a consistent format:
+
+```json
+{
+  "error": {
+    "code": "PROVIDER_RATE_LIMITED",
+    "message": "Anthropic rate limit exceeded. Retrying with OpenAI.",
+    "provider": "anthropic",
+    "retryAfterMs": 5000,
+    "requestId": "req-xyz"
+  }
+}
+```
+
+### Error Codes
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `INVALID_REQUEST` | 400 | Malformed JSON or missing required fields |
+| `UNAUTHORIZED` | 401 | Missing or invalid API key |
+| `FORBIDDEN` | 403 | API key lacks required permissions |
+| `NOT_FOUND` | 404 | Resource (skill, document, key) not found |
+| `RATE_LIMITED` | 429 | Kernel-level rate limit exceeded |
+| `PROVIDER_ERROR` | 502 | All providers returned errors |
+| `PROVIDER_RATE_LIMITED` | 429 | Provider-level rate limit — kernel may auto-retry |
+| `PROVIDER_TIMEOUT` | 504 | Provider response timeout |
+| `SKILL_INPUT_INVALID` | 422 | Skill input failed JSON Schema validation |
+| `SKILL_NOT_FOUND` | 404 | Requested skill not registered |
+| `MEMORY_TIER_UNAVAILABLE` | 503 | Requested memory tier is down |
+| `INTERNAL_ERROR` | 500 | Unexpected kernel error |
+
+---
+
+## Rate Limiting
+
+Rate limits are returned in response headers:
+
+```http
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 842
+X-RateLimit-Reset: 1705329600
+X-RateLimit-Window: 60
+```
+
+Default limits (configurable per API key):
+
+| Endpoint Group | Limit |
+|----------------|-------|
+| `/v1/provider/*` | 1,000 req/min |
+| `/v1/memory/*` | 10,000 req/min |
+| `/v1/rag/ingest` | 100 req/min |
+| `/v1/rag/search` | 2,000 req/min |
+| `/v1/skills/*/invoke` | 500 req/min |
+
+---
+
+## MCP Compatibility Endpoint
+
+When `mcp.enabled: true`, the kernel exposes an MCP-compatible endpoint:
+
+```
+GET  /mcp          — MCP capability discovery
+POST /mcp          — MCP JSON-RPC request handler
+GET  /mcp/sse      — MCP SSE transport
+```
+
+This endpoint is fully compatible with Claude Desktop, Cursor, and any other MCP host. All registered Skills are exposed as MCP Tools automatically.
+
+---
+
+<Snippet file="footer.mdx" />

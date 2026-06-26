@@ -1,0 +1,312 @@
+---
+title: "Hybrid RAG"
+description: "Combine semantic vector search with keyword BM25 for significantly better retrieval precision."
+icon: "magnifying-glass"
+---
+
+## Why Hybrid RAG?
+
+Pure semantic (vector) search excels at conceptual similarity but can miss exact keyword matches. Pure keyword search (BM25) excels at exact matches but misses paraphrases and synonyms. **Hybrid RAG** combines both for the best of both worlds.
+
+| Query | Semantic only | Keyword only | Hybrid |
+|-------|--------------|--------------|--------|
+| "H2O memory" | Finds memory docs ✅ | Finds "H2O" exactly ✅ | Best recall ✅ |
+| "how does promotion work" | Finds related content ✅ | Misses semantic variants ❌ | ✅ |
+| "AKP v0.1.0 release notes" | Misses exact version ❌ | Finds exact version ✅ | ✅ |
+| "performance optimization tips" | Good coverage ✅ | Needs exact words ❌ | ✅ |
+
+---
+
+## Configuration
+
+Enable hybrid search in your kernel config:
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({
+  rag: {
+    // Embedding model for semantic search
+    embedder: {
+      provider: "openai",
+      model: "text-embedding-3-small",
+      dimensions: 1536,
+    },
+
+    // pgvector with full-text search enabled
+    vectorStore: {
+      adapter: "pgvector",
+      url: process.env.DATABASE_URL!,
+      table: "akp_embeddings",
+      // Enable BM25 full-text search alongside vector search
+      fullTextSearch: {
+        enabled: true,
+        language: "english",     // PostgreSQL text search language
+        // Weight configuration for BM25
+        weights: { title: "A", content: "B", metadata: "C" },
+      },
+    },
+
+    // Optional: reranker for final precision boost
+    reranker: {
+      provider: "cohere",
+      model: "rerank-english-v3.0",
+      apiKey: process.env.COHERE_API_KEY!,
+      topN: 5,
+    },
+  },
+});
+```
+
+---
+
+## Basic Hybrid Search
+
+```typescript
+// Simple hybrid search: 70% semantic, 30% keyword
+const results = await kernel.rag.search({
+  query: "memory tier promotion rules",
+  limit: 10,
+  mode: "hybrid",
+  hybridAlpha: 0.7,   // 0 = keyword only, 1 = semantic only
+});
+
+for (const result of results) {
+  console.log(`
+    Score: ${result.score.toFixed(3)}
+    Reranked: ${result.rerankedScore?.toFixed(3) ?? "N/A"}
+    Content: ${result.chunk.content.slice(0, 100)}...
+  `);
+}
+```
+
+---
+
+## Reciprocal Rank Fusion (RRF)
+
+AKP supports **Reciprocal Rank Fusion**, which combines semantic and keyword result rankings without needing a score normalization step:
+
+```typescript
+const results = await kernel.rag.search({
+  query: "how to configure warm memory Redis",
+  limit: 10,
+  mode: "hybrid",
+  fusionMethod: "rrf",     // "linear" | "rrf"
+  rrfK: 60,                // RRF constant (default: 60)
+});
+```
+
+RRF is often more robust than linear combination because it doesn't require tuning the alpha parameter.
+
+---
+
+## Query Expansion
+
+Improve recall by expanding the query before retrieval:
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({ /* ... */ });
+
+async function searchWithQueryExpansion(query: string, limit: number = 10) {
+  // 1. Generate query variants using the LLM
+  const expansionResponse = await kernel.provider.complete({
+    messages: [
+      {
+        role: "user",
+        content: `Generate 3 alternative phrasings of this search query for a technical documentation search. Return as a JSON array of strings.
+        
+        Query: "${query}"`,
+      },
+    ],
+    responseFormat: {
+      type: "json_schema",
+      schema: { type: "array", items: { type: "string" } },
+    },
+    maxTokens: 200,
+  });
+
+  const variants = [query, ...(expansionResponse.parsed as string[])];
+
+  // 2. Search with each variant and merge results
+  const allResults = await Promise.all(
+    variants.map(q =>
+      kernel.rag.search({
+        query: q,
+        limit: Math.ceil(limit / 2),
+        mode: "hybrid",
+        hybridAlpha: 0.7,
+      })
+    )
+  );
+
+  // 3. Deduplicate by chunk ID and keep highest scores
+  const seen = new Map<string, (typeof allResults)[0][0]>();
+  for (const batch of allResults) {
+    for (const result of batch) {
+      const existing = seen.get(result.chunk.id);
+      if (!existing || result.score > existing.score) {
+        seen.set(result.chunk.id, result);
+      }
+    }
+  }
+
+  // 4. Sort by score and return top results
+  return Array.from(seen.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+```
+
+---
+
+## Multi-Stage Retrieval
+
+For high-precision use cases, use a two-stage pipeline: broad retrieval → precise reranking:
+
+```typescript
+async function multiStageRetrieval(query: string) {
+  // Stage 1: Broad retrieval (high recall, lower precision)
+  const candidates = await kernel.rag.search({
+    query,
+    limit: 50,           // Cast a wide net
+    mode: "hybrid",
+    hybridAlpha: 0.6,
+    minScore: 0.3,       // Low threshold to maximize recall
+    // Skip built-in reranker here
+    rerank: false,
+  });
+
+  if (candidates.length === 0) return [];
+
+  // Stage 2: Cross-encoder reranking (high precision)
+  const reranked = await kernel.rag.rerank({
+    query,
+    chunks: candidates.map(r => r.chunk),
+    topN: 5,
+    // Uses configured reranker (Cohere, etc.)
+  });
+
+  return reranked;
+}
+```
+
+---
+
+## Chunking Strategy Comparison
+
+The chunking strategy significantly impacts hybrid search quality:
+
+```typescript
+// Strategy 1: Fixed-size chunks (simple, predictable)
+const fixedKernel = createKernel({
+  rag: {
+    chunker: {
+      strategy: "fixed",
+      chunkSize: 512,
+      chunkOverlap: 64,
+    },
+    // ...
+  },
+});
+
+// Strategy 2: Recursive (respects natural boundaries)
+const recursiveKernel = createKernel({
+  rag: {
+    chunker: {
+      strategy: "recursive",
+      chunkSize: 512,
+      chunkOverlap: 64,
+      separators: ["\n## ", "\n### ", "\n\n", "\n", " "],
+    },
+    // ...
+  },
+});
+
+// Strategy 3: Markdown-aware (best for documentation)
+const markdownKernel = createKernel({
+  rag: {
+    chunker: {
+      strategy: "markdown",
+      chunkSize: 1024,
+      chunkOverlap: 128,
+      // Each H2/H3 section becomes its own chunk
+      splitOnHeadings: ["h2", "h3"],
+    },
+    // ...
+  },
+});
+
+// Strategy 4: Semantic (groups topically related sentences)
+const semanticKernel = createKernel({
+  rag: {
+    chunker: {
+      strategy: "semantic",
+      maxChunkSize: 1024,
+      // Uses embeddings to detect topic boundaries
+      similarityThreshold: 0.5,
+    },
+    // ...
+  },
+});
+```
+
+**Recommendation for documentation sites:** Use `"markdown"` chunking with heading-aware splits. Each section becomes its own searchable unit, which aligns well with how users search documentation.
+
+---
+
+## Evaluating Retrieval Quality
+
+AKP includes built-in RAG evaluation utilities:
+
+```typescript
+import { RagEvaluator } from "@avant-dev/akp-core/evaluation";
+
+const evaluator = new RagEvaluator({ kernel });
+
+// Evaluate retrieval quality against a golden dataset
+const evalResults = await evaluator.evaluate({
+  testCases: [
+    {
+      query: "What are the AKP memory tiers?",
+      expectedDocumentIds: ["memory-spec", "h2o-overview"],
+      expectedMinScore: 0.7,
+    },
+    {
+      query: "How do I configure the warm memory Redis adapter?",
+      expectedDocumentIds: ["memory-spec", "quickstart"],
+    },
+  ],
+  // Metrics to compute
+  metrics: ["precision@5", "recall@5", "mrr", "ndcg"],
+});
+
+console.log(evalResults);
+// {
+//   "precision@5": 0.82,
+//   "recall@5": 0.91,
+//   "mrr": 0.87,
+//   "ndcg": 0.89,
+//   "testCases": [...]
+// }
+```
+
+---
+
+## Production Checklist
+
+<CheckList>
+  - [ ] Enable `fullTextSearch` in pgvector config
+  - [ ] Set `hybridAlpha` based on your query distribution (start at 0.7)
+  - [ ] Configure a reranker (Cohere is recommended) for final precision
+  - [ ] Use markdown-aware chunking for documentation
+  - [ ] Implement query expansion for short/ambiguous queries
+  - [ ] Set up RAG evaluation with golden datasets
+  - [ ] Monitor retrieval latency with OpenTelemetry
+  - [ ] Index `metadata` columns for fast filtered searches
+</CheckList>
+
+---
+
+<Snippet file="footer.mdx" />

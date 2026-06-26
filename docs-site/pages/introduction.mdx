@@ -1,0 +1,141 @@
+---
+title: "Introduction to AKP"
+description: "AI Kernel Protocol — the composable infrastructure layer for production AI systems, built on top of MCP."
+icon: "microchip"
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.svg"
+  alt="AKP Architecture"
+  style={{ borderRadius: '12px', marginBottom: '2rem' }}
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.svg"
+  alt="AKP Architecture"
+  style={{ borderRadius: '12px', marginBottom: '2rem' }}
+/>
+
+## What is the AI Kernel Protocol?
+
+The **AI Kernel Protocol (AKP)** is an open, provider-agnostic infrastructure protocol that defines how AI systems store memory, retrieve knowledge, execute skills, and route between LLM providers — all through a composable, wire-compatible interface.
+
+Where [Model Context Protocol (MCP)](https://modelcontextprotocol.io) standardizes the _tool layer_ between LLMs and external systems, AKP standardizes the _infrastructure layer_ beneath your AI application: the primitives that every production AI system needs but rebuilds from scratch.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/pages/quickstart">
+    Deploy your first AKP kernel in 5 minutes.
+  </Card>
+  <Card title="AKP vs MCP" icon="arrows-left-right" href="/pages/mcp-relationship">
+    Understand how AKP and MCP work together.
+  </Card>
+  <Card title="Specification" icon="book-open" href="/pages/spec/overview">
+    Read the full AKP specification.
+  </Card>
+  <Card title="TypeScript SDK" icon="code" href="/pages/reference/typescript-sdk">
+    Start building with `@avant-dev/akp-core`.
+  </Card>
+</CardGroup>
+
+---
+
+## The Four Primitives
+
+AKP defines four composable primitives that cover the full lifecycle of an AI request:
+
+<Steps>
+  <Step title="Provider" icon="cloud">
+    A **Provider** abstracts LLM backends (Anthropic, OpenAI, Mistral, DeepSeek) behind a single, unified interface with built-in fallback routing, cost tracking, and capability negotiation.
+  </Step>
+  <Step title="Memory" icon="brain">
+    **Memory** is a first-class, tiered primitive with three heat levels: **Hot** (in-flight context), **Warm** (session cache), and **Cold** (persistent long-term store). This is the **H2O principle**.
+  </Step>
+  <Step title="RAG" icon="magnifying-glass">
+    **RAG** (Retrieval-Augmented Generation) is a typed pipeline primitive: chunk → embed → index → retrieve → rerank. AKP defines the wire format for each stage, so RAG pipelines are portable across vector stores.
+  </Step>
+  <Step title="Skills" icon="bolt">
+    **Skills** are composable, versioned AI capabilities that can be registered, discovered, and invoked — much like functions, but with AI-aware signatures, streaming support, and structured outputs.
+  </Step>
+</Steps>
+
+---
+
+## The H2O Memory Principle
+
+<Note>
+  H2O stands for **Hot → Warm → Cold**, modeling memory after thermodynamic heat — the hotter the memory, the faster and more expensive it is to access.
+</Note>
+
+AKP treats memory not as a flat key-value store but as a **thermal hierarchy**:
+
+| Tier | Alias | Latency | Persistence | Use Case |
+|------|-------|---------|-------------|----------|
+| 🔴 Hot | `memory.hot` | < 1ms | In-process / RAM | Active turn context, sliding window |
+| 🟡 Warm | `memory.warm` | 1–50ms | Redis / Memcached | Session history, recent interactions |
+| 🔵 Cold | `memory.cold` | 50–500ms | PostgreSQL / S3 | Long-term facts, user profiles |
+
+This maps directly to how human memory works — and how production AI systems _should_ be architected. Context overflow is handled by **automatic promotion/demotion** across tiers based on recency and salience scoring.
+
+```typescript
+import { KernelClient } from "@avant-dev/akp-core";
+
+const kernel = new KernelClient({ baseUrl: "http://localhost:8080" });
+
+// Write to warm memory (session-level)
+await kernel.memory.write({
+  tier: "warm",
+  key: "user:42:preferences",
+  value: { theme: "dark", language: "en" },
+  ttl: 3600,
+});
+
+// Read with automatic tier fallback: hot → warm → cold
+const prefs = await kernel.memory.read({
+  key: "user:42:preferences",
+  tiers: ["hot", "warm", "cold"],
+});
+```
+
+---
+
+## Why AKP Exists
+
+Every team building production AI systems reinvents the same four wheels:
+
+1. **Provider abstraction** — handling multiple LLM APIs with different schemas
+2. **Memory management** — context windows, session history, long-term recall
+3. **Knowledge retrieval** — chunking, embedding, vector search, reranking
+4. **Skill composition** — wrapping LLM calls into reusable, testable units
+
+AKP provides a single, open, wire-compatible specification for all four — so you build _on_ infrastructure instead of _building_ it.
+
+---
+
+## Design Principles
+
+<AccordionGroup>
+  <Accordion title="Open by default" icon="lock-open">
+    AKP is licensed under [Avant.Dev SAL v1.0](https://avant.dev/licenses/sal-v1) — a source-available license designed for infrastructure protocols. The specification itself is royalty-free.
+  </Accordion>
+  <Accordion title="Provider-agnostic" icon="shuffle">
+    No vendor lock-in. AKP routes across Anthropic, OpenAI, Mistral, and DeepSeek transparently. Adding a new provider requires implementing a single TypeScript interface.
+  </Accordion>
+  <Accordion title="MCP-compatible" icon="plug">
+    AKP is built _on top of_ MCP, not in competition with it. AKP kernels expose MCP tool endpoints so any MCP-compatible host can connect instantly.
+  </Accordion>
+  <Accordion title="Wire-first" icon="cable-car">
+    Every primitive has a stable REST + SSE wire format. Your backend can be TypeScript, Python, Go, or Rust — the protocol is language-agnostic.
+  </Accordion>
+  <Accordion title="Composable" icon="puzzle-piece">
+    Primitives compose. A Skill can use RAG internally. RAG can write summaries to Memory. Memory can route to different Providers based on tier. The kernel orchestrates everything.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Built by Avant.Dev
+
+AKP was designed and authored by **Erick González Aguilar** at **Avant.Dev**, headquartered in Mexico City. Avant.Dev is a signatory of the **UN ITU Partner2Connect (P2C) Digital Pledge #7528**, committed to expanding meaningful digital connectivity across 10 Latin American countries: Mexico, Colombia, Brazil, Argentina, Chile, Peru, Ecuador, Costa Rica, Dominican Republic, and Panama.
+
+<Snippet file="footer.mdx" />

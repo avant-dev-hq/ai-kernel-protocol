@@ -1,0 +1,163 @@
+---
+title: "AKP and MCP"
+description: "How the AI Kernel Protocol relates to the Model Context Protocol — and why you want both."
+icon: "arrows-left-right"
+---
+
+## TL;DR
+
+| Dimension | MCP | AKP |
+|-----------|-----|-----|
+| **Layer** | Tool interface (LLM ↔ external systems) | Infrastructure kernel (memory, RAG, skills, providers) |
+| **Who implements it** | Tool server authors | Platform/infra engineers |
+| **Primitives** | Tools, Resources, Prompts | Providers, Memory, RAG, Skills |
+| **Wire format** | JSON-RPC 2.0 over SSE/stdio | REST + SSE over HTTP/2 |
+| **Relationship** | Peer protocol | AKP _exposes_ MCP endpoints |
+| **Analogous to** | USB (device interface) | Operating system kernel |
+
+---
+
+## The Layer Diagram
+
+```
+┌───────────────────────────────────────────────────────┐
+│                   AI Application                      │
+│          (chat UI, agent orchestrator, etc.)          │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│           AI Kernel Protocol (AKP)                    │
+│                                                       │
+│  ┌──────────┐  ┌────────┐  ┌─────┐  ┌────────────┐  │
+│  │ Provider │  │ Memory │  │ RAG │  │   Skills   │  │
+│  │Abstraction│  │  H2O  │  │     │  │  Registry  │  │
+│  └──────────┘  └────────┘  └─────┘  └────────────┘  │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │          MCP Compatibility Layer                │  │
+│  │   (exposes /mcp endpoint for MCP hosts)         │  │
+│  └─────────────────────────────────────────────────┘  │
+└───────────────────────────┬───────────────────────────┘
+                            │
+         ┌──────────────────┼──────────────────┐
+         │                  │                  │
+┌────────▼───────┐  ┌───────▼──────┐  ┌───────▼──────┐
+│   LLM Provider │  │ Vector Store │  │  Memory Store │
+│ Anthropic/OAI/ │  │  pgvector /  │  │ Redis / Postgres│
+│ Mistral/DS     │  │  Pinecone    │  │  / S3         │
+└────────────────┘  └──────────────┘  └──────────────┘
+```
+
+---
+
+## MCP: The Tool Interface Standard
+
+MCP (Model Context Protocol) solves the problem of **connecting LLMs to external tools**. It defines a standard JSON-RPC protocol for:
+
+- **Tools** — functions the LLM can call (search the web, read a file, query a database)
+- **Resources** — static or dynamic data sources the LLM can read
+- **Prompts** — reusable prompt templates with structured inputs
+
+MCP is excellent at what it does. It's the "USB standard" for AI tools — once a tool server implements MCP, any MCP-compatible host (Claude Desktop, Cursor, your custom agent) can use it.
+
+**What MCP doesn't define:**
+- How to store and retrieve memory across turns
+- How to select, route, and fall back between LLM providers
+- How to run a RAG pipeline (chunking, embedding, retrieval, reranking)
+- How to register and discover reusable AI skills
+
+---
+
+## AKP: The Infrastructure Kernel
+
+AKP fills the gap _below_ MCP. It's the infrastructure kernel that manages:
+
+1. **Which provider handles each request** — with cost-aware routing and automatic fallback
+2. **What the LLM remembers** — across turns, sessions, and users (H2O memory tiers)
+3. **How knowledge is retrieved** — a portable, typed RAG pipeline specification
+4. **What skills are available** — a composable, versioned skill registry with streaming support
+
+AKP sits _between_ your application and your infrastructure — just like an operating system kernel sits between your application and the hardware.
+
+---
+
+## They Compose, Not Compete
+
+AKP **exposes an MCP endpoint**. This means any MCP-compatible host (Claude Desktop, Cursor, Zed) can connect to an AKP kernel and use its skills, memory, and RAG as MCP tools — automatically.
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({
+  providers: { anthropic: { apiKey: process.env.ANTHROPIC_API_KEY! } },
+  memory: { hot: {}, warm: { adapter: "redis", url: process.env.REDIS_URL! } },
+  mcp: {
+    // AKP exposes all skills as MCP tools
+    enabled: true,
+    path: "/mcp",
+    // Memory read/write exposed as MCP resources
+    exposeMemoryAsResources: true,
+  },
+});
+```
+
+With `mcp.enabled: true`, your AKP kernel becomes a fully compliant MCP server. You get both: the composable kernel infrastructure _and_ compatibility with the entire MCP ecosystem.
+
+---
+
+## Provider Comparison
+
+AKP's Provider primitive abstracts the following LLM backends:
+
+| Provider | Models | Streaming | Function Calling | JSON Mode | Vision |
+|----------|--------|-----------|-----------------|-----------|--------|
+| **Anthropic** | claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5 | ✅ | ✅ | ✅ | ✅ |
+| **OpenAI** | gpt-4o, gpt-4o-mini, o1-preview | ✅ | ✅ | ✅ | ✅ |
+| **Mistral** | mistral-large-2, mistral-8x7b | ✅ | ✅ | ✅ | ❌ |
+| **DeepSeek** | deepseek-chat, deepseek-coder | ✅ | ✅ | ✅ | ❌ |
+
+All providers expose the same `ProviderRequest` / `ProviderResponse` types, so switching providers requires zero application code changes.
+
+```typescript
+import type { ProviderRequest, ProviderResponse } from "@avant-dev/akp-core";
+
+// Same request, any provider
+const request: ProviderRequest = {
+  messages: [{ role: "user", content: "Hola, ¿cómo estás?" }],
+  model: "claude-opus-4-5", // or "gpt-4o", or "mistral-large-2"
+  temperature: 0.7,
+  maxTokens: 1024,
+};
+
+const response: ProviderResponse = await kernel.provider.complete(request);
+```
+
+---
+
+## Migration Guide: From Raw MCP to AKP
+
+If you're already using MCP tool servers, you can adopt AKP incrementally:
+
+<Steps>
+  <Step title="Install AKP">
+    ```bash
+    npm install @avant-dev/akp-core
+    ```
+  </Step>
+  <Step title="Wrap your provider calls">
+    Replace direct Anthropic/OpenAI SDK calls with `kernel.provider.complete()`. This gives you immediate fallback routing and cost tracking.
+  </Step>
+  <Step title="Migrate memory to H2O">
+    Replace ad-hoc Redis/DB calls for context storage with `kernel.memory.write()` / `kernel.memory.read()`. The H2O tier system handles expiry and promotion automatically.
+  </Step>
+  <Step title="Enable MCP compatibility">
+    Set `mcp.enabled: true` in your kernel config. Your existing MCP tool clients continue working without modification.
+  </Step>
+  <Step title="Register skills">
+    Wrap your existing AI "functions" as AKP Skills. This makes them discoverable, testable, and composable with other skills.
+  </Step>
+</Steps>
+
+---
+
+<Snippet file="footer.mdx" />

@@ -1,0 +1,395 @@
+---
+title: "Your First AKP Implementation"
+description: "Build a complete AKP-powered AI assistant from scratch — with memory, RAG, and a custom skill."
+icon: "hammer"
+---
+
+## What You'll Build
+
+By the end of this guide, you'll have a fully working **AI assistant** that:
+
+- Routes requests across Anthropic and OpenAI with automatic fallback
+- Remembers user preferences across sessions (H2O memory)
+- Retrieves relevant knowledge from a document corpus (RAG)
+- Exposes a custom `answer_question` skill
+- Serves all of this via the AKP REST API + an MCP endpoint
+
+**Estimated time:** 30–45 minutes  
+**Prerequisites:** Node.js ≥ 18, PostgreSQL (or Docker), Redis
+
+---
+
+## Project Setup
+
+```bash
+mkdir my-ai-assistant && cd my-ai-assistant
+npm init -y
+npm install @avant-dev/akp-core tsx dotenv
+```
+
+Create a `.env` file:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+DATABASE_URL=******localhost:5432/assistant
+REDIS_URL=redis://localhost:6379
+PORT=8080
+```
+
+---
+
+## Step 1: Database Setup
+
+Create the required tables (AKP migrations):
+
+```bash
+npx akp migrate --db $DATABASE_URL
+```
+
+This creates:
+- `akp_memory` — cold memory storage
+- `akp_embeddings` — pgvector embeddings for RAG
+
+If you prefer Docker for local dev:
+
+```bash
+docker compose up -d
+```
+
+Create `docker-compose.yml`:
+
+```yaml
+version: "3.9"
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: assistant
+      POSTGRES_PASSWORD: password
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+```
+
+---
+
+## Step 2: Define Your Skill
+
+Create `src/skills/answer-question.ts`:
+
+```typescript
+import { defineSkill } from "@avant-dev/akp-core";
+
+export const answerQuestionSkill = defineSkill({
+  name: "answer_question",
+  version: "1.0.0",
+  description: "Answers questions using the knowledge base and user memory.",
+  tags: ["qa", "rag"],
+  input: {
+    type: "object",
+    properties: {
+      question: { type: "string", description: "The user's question" },
+      userId: { type: "string", description: "User ID for personalization" },
+      sessionId: { type: "string", description: "Session ID for context" },
+    },
+    required: ["question"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      answer: { type: "string" },
+      sources: { type: "array", items: { type: "string" } },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+    },
+    required: ["answer"],
+  },
+
+  async execute({ input, kernel }) {
+    // 1. Load user preferences from warm/cold memory
+    const userPrefs = await kernel.memory.read({
+      key: `user:${input.userId}:preferences`,
+      tiers: ["warm", "cold"],
+    });
+
+    // 2. Load recent session context from warm memory
+    const sessionCtx = await kernel.memory.read({
+      key: `session:${input.sessionId}:history`,
+      tiers: ["hot", "warm"],
+    });
+
+    // 3. Search knowledge base via RAG
+    const ragResults = await kernel.rag.search({
+      query: input.question,
+      limit: 5,
+      minScore: 0.65,
+    });
+
+    const knowledge = ragResults
+      .map((r, i) => `[${i + 1}] ${r.chunk.content}`)
+      .join("\n\n");
+
+    // 4. Build the context-aware prompt
+    const systemPrompt = [
+      "You are a helpful AI assistant.",
+      userPrefs?.value
+        ? `User preferences: ${JSON.stringify(userPrefs.value)}`
+        : "",
+      knowledge
+        ? `Relevant knowledge:\n${knowledge}\n\nCite sources as [1], [2], etc.`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const messages = [
+      { role: "system" as const, content: systemPrompt },
+      ...(sessionCtx?.value as any[] ?? []),
+      { role: "user" as const, content: input.question },
+    ];
+
+    // 5. Complete with provider routing (Anthropic first, OpenAI fallback)
+    const response = await kernel.provider.complete({
+      messages,
+      temperature: 0.3,
+      maxTokens: 2048,
+    });
+
+    // 6. Update session history in warm memory
+    await kernel.memory.write({
+      tier: "warm",
+      key: `session:${input.sessionId}:history`,
+      value: [
+        ...(sessionCtx?.value as any[] ?? []),
+        { role: "user", content: input.question },
+        { role: "assistant", content: response.content },
+      ].slice(-20), // Keep last 20 messages
+      ttl: 1800,    // 30 minutes
+    });
+
+    return {
+      answer: response.content,
+      sources: ragResults.map(r => r.chunk.documentId),
+      confidence: ragResults[0]?.score ?? 0,
+    };
+  },
+});
+```
+
+---
+
+## Step 3: Create the Kernel
+
+Create `src/kernel.ts`:
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+import { answerQuestionSkill } from "./skills/answer-question";
+
+export const kernel = createKernel({
+  providers: {
+    anthropic: {
+      apiKey: process.env.ANTHROPIC_API_KEY!,
+      defaultModel: "claude-opus-4-5",
+    },
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY!,
+      defaultModel: "gpt-4o",
+    },
+  },
+
+  routing: {
+    strategy: "primary-with-fallback",
+    primary: "anthropic",
+    fallbacks: ["openai"],
+    fallbackOn: ["timeout", "rate_limit", "server_error"],
+  },
+
+  memory: {
+    hot: { maxTokens: 8192, maxEntries: 500 },
+    warm: {
+      adapter: "redis",
+      url: process.env.REDIS_URL!,
+      ttl: 3600,
+      keyPrefix: "assistant:warm:",
+    },
+    cold: {
+      adapter: "postgres",
+      url: process.env.DATABASE_URL!,
+      table: "akp_memory",
+    },
+  },
+
+  rag: {
+    chunker: {
+      strategy: "recursive",
+      chunkSize: 512,
+      chunkOverlap: 64,
+    },
+    embedder: {
+      provider: "openai",
+      model: "text-embedding-3-small",
+      dimensions: 1536,
+    },
+    vectorStore: {
+      adapter: "pgvector",
+      url: process.env.DATABASE_URL!,
+      table: "akp_embeddings",
+    },
+  },
+
+  mcp: {
+    enabled: true,
+    path: "/mcp",
+  },
+});
+
+// Register skills
+kernel.skills.register(answerQuestionSkill);
+```
+
+---
+
+## Step 4: Start the Server
+
+Create `src/server.ts`:
+
+```typescript
+import "dotenv/config";
+import { KernelServer } from "@avant-dev/akp-core/server";
+import { kernel } from "./kernel";
+
+const server = new KernelServer({
+  kernel,
+  port: parseInt(process.env.PORT ?? "8080"),
+  cors: { origin: "*" },
+  // API key authentication
+  auth: {
+    keys: [process.env.AKP_SECRET_KEY ?? "dev-key-change-in-production"],
+  },
+});
+
+await server.start();
+
+console.log(`
+  🚀 AI Assistant Kernel running!
+  
+  REST API:  http://localhost:${server.port}/v1/
+  MCP:       http://localhost:${server.port}/mcp
+  Health:    http://localhost:${server.port}/health
+`);
+```
+
+```bash
+npx tsx src/server.ts
+```
+
+---
+
+## Step 5: Ingest Your Knowledge Base
+
+```typescript
+// scripts/ingest.ts
+import "dotenv/config";
+import { KernelClient } from "@avant-dev/akp-core";
+
+const client = new KernelClient({
+  baseUrl: "http://localhost:8080",
+  apiKey: process.env.AKP_SECRET_KEY ?? "dev-key-change-in-production",
+});
+
+const documents = [
+  {
+    id: "about-akp",
+    content: `# About the AI Kernel Protocol
+    
+    AKP is an open infrastructure protocol for composable AI systems...`,
+    mimeType: "text/markdown" as const,
+    metadata: { category: "documentation" },
+  },
+  {
+    id: "getting-started",
+    content: `# Getting Started with AKP
+    
+    To deploy your first kernel...`,
+    mimeType: "text/markdown" as const,
+    metadata: { category: "guide" },
+  },
+];
+
+for (const doc of documents) {
+  console.log(`Ingesting: ${doc.id}`);
+  await client.rag.ingest({ document: doc });
+  console.log(`✓ ${doc.id}`);
+}
+
+console.log("Knowledge base ready!");
+```
+
+```bash
+npx tsx scripts/ingest.ts
+```
+
+---
+
+## Step 6: Test Your Assistant
+
+```bash
+# Answer a question
+# Replace <your-api-key> with your AKP_SECRET_KEY value
+curl -X POST http://localhost:8080/v1/skills/answer_question/invoke \
+  -H "Authorization: [Bearer] <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "question": "What are the AKP memory tiers?",
+      "userId": "user-42",
+      "sessionId": "session-abc123"
+    }
+  }'
+```
+
+Expected response:
+
+```json
+{
+  "ok": true,
+  "skill": "answer_question",
+  "output": {
+    "answer": "AKP uses a three-tier H2O memory system: Hot (in-process RAM, <1ms), Warm (Redis, 1-50ms), and Cold (PostgreSQL, 50-500ms)...",
+    "sources": ["about-akp"],
+    "confidence": 0.891
+  },
+  "latencyMs": 1243,
+  "usage": { "inputTokens": 612, "outputTokens": 187, "costUsd": 0.00524 }
+}
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Custom Skills" icon="bolt" href="/pages/guides/custom-skills">
+    Build advanced skills with streaming, composition, and error handling.
+  </Card>
+  <Card title="Hybrid RAG" icon="magnifying-glass" href="/pages/guides/hybrid-rag">
+    Combine semantic and keyword search for better retrieval precision.
+  </Card>
+  <Card title="iOS Swift Client" icon="apple" href="/pages/guides/ios-swift-client">
+    Connect your iOS app to an AKP kernel with native Swift.
+  </Card>
+  <Card title="API Reference" icon="terminal" href="/pages/reference/api">
+    Full REST API documentation.
+  </Card>
+</CardGroup>
+
+---
+
+<Snippet file="footer.mdx" />

@@ -1,0 +1,255 @@
+---
+title: "Quickstart"
+description: "Deploy a production-ready AKP kernel in under 5 minutes."
+icon: "rocket"
+---
+
+<Note>
+  **Prerequisites:** Node.js ≥ 18, Docker (optional), and an API key for at least one LLM provider (Anthropic, OpenAI, Mistral, or DeepSeek).
+</Note>
+
+## 1. Install the SDK
+
+```bash
+npm install @avant-dev/akp-core
+# or
+pnpm add @avant-dev/akp-core
+# or
+yarn add @avant-dev/akp-core
+```
+
+## 2. Create a Kernel
+
+Create a file called `kernel.ts` in your project:
+
+```typescript
+// kernel.ts
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({
+  // Provider configuration — at least one required
+  providers: {
+    anthropic: {
+      apiKey: process.env.ANTHROPIC_API_KEY!,
+      defaultModel: "claude-opus-4-5",
+    },
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY,
+      defaultModel: "gpt-4o",
+    },
+  },
+
+  // Memory configuration
+  memory: {
+    hot: { maxTokens: 8192 },
+    warm: {
+      adapter: "redis",
+      url: process.env.REDIS_URL ?? "redis://localhost:6379",
+      ttl: 3600,
+    },
+    cold: {
+      adapter: "postgres",
+      url: process.env.DATABASE_URL ?? "postgresql://localhost:5432/akp",
+    },
+  },
+
+  // RAG configuration (optional)
+  rag: {
+    embedder: { provider: "openai", model: "text-embedding-3-small" },
+    vectorStore: { adapter: "pgvector", url: process.env.DATABASE_URL! },
+  },
+});
+
+export default kernel;
+```
+
+## 3. Start the Kernel Server
+
+```typescript
+// server.ts
+import { KernelServer } from "@avant-dev/akp-core/server";
+import kernel from "./kernel";
+
+const server = new KernelServer({
+  kernel,
+  port: 8080,
+  // Expose MCP-compatible endpoint for any MCP host
+  mcp: { enabled: true, path: "/mcp" },
+});
+
+await server.start();
+console.log("🚀 AKP Kernel running on http://localhost:8080");
+```
+
+Run it:
+
+```bash
+npx tsx server.ts
+```
+
+## 4. Make Your First Request
+
+With the kernel running, try a simple completion:
+
+```typescript
+// client.ts
+import { KernelClient } from "@avant-dev/akp-core";
+
+const client = new KernelClient({ baseUrl: "http://localhost:8080" });
+
+// Simple completion
+const response = await client.provider.complete({
+  messages: [{ role: "user", content: "What is the capital of Mexico?" }],
+  model: "claude-opus-4-5",
+});
+
+console.log(response.content); // "The capital of Mexico is Mexico City..."
+
+// Streaming completion
+const stream = await client.provider.stream({
+  messages: [{ role: "user", content: "Explain AKP in one sentence." }],
+});
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.delta ?? "");
+}
+```
+
+## 5. Use Memory
+
+```typescript
+// Store something in warm memory (session-scoped)
+await client.memory.write({
+  tier: "warm",
+  key: "session:abc123:context",
+  value: { topic: "AKP quickstart", user: "developer" },
+  ttl: 3600,
+});
+
+// Retrieve with automatic tier fallback
+const ctx = await client.memory.read({
+  key: "session:abc123:context",
+  tiers: ["hot", "warm"],
+});
+
+console.log(ctx?.value); // { topic: "AKP quickstart", user: "developer" }
+```
+
+## 6. Register a Skill
+
+```typescript
+import { defineSkill } from "@avant-dev/akp-core";
+
+const summarizeSkill = defineSkill({
+  name: "summarize",
+  version: "1.0.0",
+  description: "Summarizes a block of text into bullet points.",
+  input: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "Text to summarize" },
+      maxBullets: { type: "number", default: 5 },
+    },
+    required: ["text"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      bullets: { type: "array", items: { type: "string" } },
+    },
+  },
+  async execute({ input, kernel }) {
+    const result = await kernel.provider.complete({
+      messages: [
+        {
+          role: "user",
+          content: `Summarize the following text into at most ${input.maxBullets} bullet points:\n\n${input.text}`,
+        },
+      ],
+      responseFormat: { type: "json_schema", schema: "SummaryOutput" },
+    });
+    return result.parsed;
+  },
+});
+
+// Register with the kernel
+kernel.skills.register(summarizeSkill);
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="First Implementation" icon="hammer" href="/pages/guides/first-implementation">
+    Build a complete AKP-powered AI assistant from scratch.
+  </Card>
+  <Card title="Memory Primitive" icon="brain" href="/pages/spec/memory">
+    Deep-dive into the H2O memory specification.
+  </Card>
+  <Card title="Custom Skills" icon="bolt" href="/pages/guides/custom-skills">
+    Build advanced, composable skills with streaming output.
+  </Card>
+  <Card title="API Reference" icon="terminal" href="/pages/reference/api">
+    Full REST API documentation for all kernel endpoints.
+  </Card>
+</CardGroup>
+
+---
+
+## Deploy to Production
+
+<Tabs>
+  <Tab title="Vercel">
+    ```bash
+    # Install Vercel CLI
+    npm i -g vercel
+
+    # Deploy
+    vercel --prod
+    ```
+
+    Set environment variables in the Vercel dashboard:
+    - `ANTHROPIC_API_KEY`
+    - `REDIS_URL`
+    - `DATABASE_URL`
+  </Tab>
+  <Tab title="Railway">
+    ```bash
+    # Install Railway CLI
+    npm i -g @railway/cli
+
+    # Login and deploy
+    railway login
+    railway init
+    railway up
+    ```
+
+    Railway auto-provisions Redis and PostgreSQL. Link services in your Railway project dashboard.
+  </Tab>
+  <Tab title="Docker">
+    ```dockerfile
+    FROM node:20-alpine
+    WORKDIR /app
+    COPY package*.json ./
+    RUN npm ci --production
+    COPY . .
+    RUN npx tsx build
+    EXPOSE 8080
+    CMD ["node", "dist/server.js"]
+    ```
+
+    ```bash
+    docker build -t my-akp-kernel .
+    docker run -p 8080:8080 \
+      -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+      -e REDIS_URL=redis://redis:6379 \
+      -e DATABASE_URL=postgresql://postgres:5432/akp \
+      my-akp-kernel
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+<Snippet file="footer.mdx" />

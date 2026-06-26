@@ -1,0 +1,206 @@
+---
+title: "AKP Compliance"
+description: "How to certify your implementation as AKP-compliant and what compliance means in practice."
+icon: "shield-check"
+---
+
+## What Is AKP Compliance?
+
+An **AKP-compliant implementation** is a kernel that correctly implements the AKP specification — wire format, primitive behaviors, and error semantics — such that any AKP client can connect to it and work correctly.
+
+Compliance is not certification by a central authority. It's a **self-attestation** backed by passing the AKP conformance test suite.
+
+---
+
+## Compliance Levels
+
+AKP defines three compliance levels:
+
+<CardGroup cols={3}>
+  <Card title="Level 1: Core" icon="circle-1">
+    **Provider + Wire Format**
+    
+    - Provider abstraction (`/v1/provider/*`)
+    - Correct SSE streaming format
+    - Standard error codes
+    - Authentication
+  </Card>
+  <Card title="Level 2: Full" icon="circle-2">
+    **All Four Primitives**
+    
+    - Level 1 +
+    - Memory H2O tiers
+    - RAG pipeline
+    - Skills registry
+  </Card>
+  <Card title="Level 3: MCP" icon="circle-3">
+    **MCP-Compatible**
+    
+    - Level 2 +
+    - MCP endpoint (`/mcp`)
+    - Skills as MCP Tools
+    - Memory as MCP Resources
+  </Card>
+</CardGroup>
+
+---
+
+## Running the Conformance Suite
+
+```bash
+# Install the conformance test runner
+npm install -g @avant-dev/akp-conformance
+
+# Run against a local kernel
+akp-conformance run \
+  --url http://localhost:8080 \
+  --api-key your-secret-key \
+  --level 2
+
+# Run a specific test group
+akp-conformance run \
+  --url http://localhost:8080 \
+  --api-key your-secret-key \
+  --group memory
+
+# Generate a conformance report
+akp-conformance run \
+  --url https://my-kernel.example.com \
+  --api-key your-secret-key \
+  --level 3 \
+  --report conformance-report.json
+```
+
+---
+
+## Conformance Test Matrix
+
+### Level 1: Provider
+
+| Test | Description |
+|------|-------------|
+| `provider.complete.basic` | Non-streaming completion returns correct schema |
+| `provider.complete.system_message` | System messages are passed to provider |
+| `provider.complete.stop_reason` | `stopReason` field is present and valid |
+| `provider.complete.usage` | `usage` block contains `inputTokens`, `outputTokens`, `costUsd` |
+| `provider.stream.sse_format` | Stream uses `data: {...}\n\n` SSE format |
+| `provider.stream.done_event` | Stream terminates with `data: [DONE]` |
+| `provider.stream.usage_event` | Stream includes `usage` event before `[DONE]` |
+| `provider.errors.401` | Missing/invalid API key returns 401 |
+| `provider.errors.400` | Malformed request returns 400 with error schema |
+| `provider.errors.code_format` | Error `code` is SCREAMING_SNAKE_CASE |
+| `provider.ratelimit.headers` | Rate limit headers present in responses |
+
+### Level 2: Memory
+
+| Test | Description |
+|------|-------------|
+| `memory.write.warm` | Write to warm tier succeeds |
+| `memory.write.cold` | Write to cold tier persists across restart |
+| `memory.read.fallback` | Read searches tiers in order: hot → warm → cold |
+| `memory.read.not_found` | Missing key returns `{ "found": false }` |
+| `memory.ttl.expiry` | Entry expires after TTL |
+| `memory.delete.single` | Delete removes entry |
+| `memory.delete.by_tag` | Delete-by-tag removes all matching entries |
+
+### Level 2: RAG
+
+| Test | Description |
+|------|-------------|
+| `rag.ingest.basic` | Document is chunked and indexed |
+| `rag.ingest.metadata` | Metadata is preserved on chunks |
+| `rag.search.semantic` | Semantic search returns relevant results |
+| `rag.search.score` | Search results include score in [0,1] |
+| `rag.search.limit` | Result count respects `limit` parameter |
+| `rag.delete.removes_chunks` | Delete removes all chunks for document |
+
+### Level 2: Skills
+
+| Test | Description |
+|------|-------------|
+| `skills.list` | `GET /v1/skills` returns array with metadata |
+| `skills.invoke.basic` | Invoke returns `ok: true` with `output` |
+| `skills.invoke.input_validation` | Invalid input returns 422 with schema errors |
+| `skills.invoke.not_found` | Unknown skill returns 404 |
+| `skills.stream.sse_format` | Skill stream uses SSE format |
+| `skills.stream.done_with_result` | Final `done` event includes `result` |
+
+### Level 3: MCP
+
+| Test | Description |
+|------|-------------|
+| `mcp.discovery` | `GET /mcp` returns MCP capability object |
+| `mcp.tools.list` | MCP `tools/list` includes all registered skills |
+| `mcp.tools.call` | MCP `tools/call` invokes skill correctly |
+| `mcp.resources.list` | MCP `resources/list` includes memory resources |
+| `mcp.transport.sse` | `GET /mcp/sse` establishes SSE transport |
+
+---
+
+## Claiming Compliance
+
+Once your implementation passes the conformance suite, you can claim compliance in your README:
+
+```markdown
+## AKP Compliance
+
+This implementation is **AKP Level 2 compliant** (v0.1.0).
+
+Conformance verified with `@avant-dev/akp-conformance@0.1.0` on [date].
+
+[![AKP Level 2 Compliant](https://img.shields.io/badge/AKP-Level%202%20Compliant-6366f1)](https://akp.avant.dev/compliance)
+```
+
+---
+
+## Implementing AKP in Other Languages
+
+The AKP specification is **language-agnostic**. The reference implementation is TypeScript, but you can build AKP kernels in any language.
+
+Requirements for an alternative implementation to claim compliance:
+
+1. **Pass the conformance suite** against the target compliance level
+2. **Implement the wire format exactly** as specified in [Wire Format](/pages/spec/wire-format)
+3. **Implement error codes** as specified — error `code` values must match exactly
+4. **Version the API** at `/v1/...`
+
+Community implementations:
+
+| Language | Repo | Level | Status |
+|----------|------|-------|--------|
+| TypeScript | `@avant-dev/akp-core` | 3 | ✅ Reference |
+| Python | _Community_ | — | 🔜 Planned |
+| Go | _Community_ | — | 🔜 Planned |
+| Rust | _Community_ | — | 🔜 Planned |
+
+---
+
+## Vendor Extensions
+
+Implementations MAY add vendor-specific extensions to the API as long as:
+
+1. Extensions do NOT conflict with any current or reserved AKP endpoint paths
+2. Extension endpoints are prefixed with the vendor namespace: `/v1/x-{vendor}/...`
+3. Extension fields in responses use `x-` prefix: `"x-myvendor-field": "..."`
+4. Extensions are documented and do not alter the behavior of compliant endpoints
+
+---
+
+## LAC Region Coverage
+
+The AI Kernel Protocol is designed to serve AI practitioners across Latin America and the Caribbean. Avant.Dev's commitment under UN ITU P2C Pledge #7528 covers ten LAC countries:
+
+<CardGroup cols={2}>
+  <Card title="North LAC" icon="globe-americas">
+    🇲🇽 Mexico · 🇨🇷 Costa Rica · 🇩🇴 Dominican Republic · 🇵🇦 Panama
+  </Card>
+  <Card title="South LAC" icon="globe-americas">
+    🇨🇴 Colombia · 🇧🇷 Brazil · 🇦🇷 Argentina · 🇨🇱 Chile · 🇵🇪 Peru · 🇪🇨 Ecuador
+  </Card>
+</CardGroup>
+
+AKP documentation, examples, and tooling are localized or designed with these regions in mind. If you're building AI infrastructure in any of these countries and need support, reach out at [avant.dev/contact](https://avant.dev/contact).
+
+---
+
+<Snippet file="footer.mdx" />

@@ -1,0 +1,146 @@
+---
+title: "Specification Overview"
+description: "The AKP specification defines four wire-compatible primitives for composable AI infrastructure."
+icon: "book-open"
+---
+
+## Specification Status
+
+<Warning>
+  AKP Specification v0.1 — **Draft**. Breaking changes may occur before v1.0. All wire formats are versioned at the HTTP level (`/v1/...`).
+</Warning>
+
+| Document | Status | Version |
+|----------|--------|---------|
+| Provider Abstraction | Draft | 0.1.0 |
+| Memory (H2O) | Draft | 0.1.0 |
+| RAG Pipeline | Draft | 0.1.0 |
+| Skills Registry | Draft | 0.1.0 |
+| Wire Format (REST + SSE) | Draft | 0.1.0 |
+| MCP Compatibility | Proposed | 0.1.0 |
+
+---
+
+## Core Philosophy
+
+The AKP specification is built on five principles:
+
+<CardGroup cols={2}>
+  <Card title="Wire-First" icon="cable-car">
+    Every primitive is defined at the wire level first. Implementations in TypeScript, Python, Go, or Rust are secondary artifacts.
+  </Card>
+  <Card title="Composable" icon="puzzle-piece">
+    Primitives compose without coupling. A Skill can use RAG without importing RAG internals — only the wire interface matters.
+  </Card>
+  <Card title="Versioned" icon="tag">
+    All endpoints are versioned (`/v1/...`). Breaking changes require a major version bump. Minor changes are backward-compatible.
+  </Card>
+  <Card title="Observable" icon="chart-line">
+    Every primitive emits OpenTelemetry spans. Cost, latency, and token usage are first-class observability signals.
+  </Card>
+</CardGroup>
+
+---
+
+## Primitive Dependency Graph
+
+```
+                    ┌──────────────┐
+                    │   Provider   │
+                    │  Abstraction │
+                    └──────┬───────┘
+                           │ uses
+            ┌──────────────┼──────────────┐
+            │              │              │
+     ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼────────┐
+     │   Memory    │ │    RAG     │ │   Skills    │
+     │    (H2O)   │ │  Pipeline  │ │  Registry   │
+     └─────────────┘ └─────┬──────┘ └────┬────────┘
+                           │              │
+                    ┌──────▼──────────────▼──────┐
+                    │   Kernel Orchestrator       │
+                    │  (request routing, billing) │
+                    └─────────────────────────────┘
+```
+
+---
+
+## Type System
+
+AKP defines a shared TypeScript type system exported from `@avant-dev/akp-core`. All wire types are derived from these TypeScript interfaces via JSON Schema generation.
+
+```typescript
+// Core type exports from @avant-dev/akp-core
+export type {
+  // Provider
+  ProviderRequest,
+  ProviderResponse,
+  ProviderStreamChunk,
+  ProviderConfig,
+  ModelCapabilities,
+
+  // Memory
+  MemoryEntry,
+  MemoryTier,
+  MemoryWriteOptions,
+  MemoryReadOptions,
+  MemorySearchOptions,
+
+  // RAG
+  RagDocument,
+  RagChunk,
+  RagEmbedding,
+  RagSearchResult,
+  RagPipelineConfig,
+
+  // Skills
+  SkillDefinition,
+  SkillInput,
+  SkillOutput,
+  SkillExecutionContext,
+  SkillStreamChunk,
+
+  // Kernel
+  KernelConfig,
+  KernelRequest,
+  KernelResponse,
+} from "@avant-dev/akp-core";
+```
+
+---
+
+## Specification Documents
+
+<CardGroup cols={2}>
+  <Card title="Provider" icon="cloud" href="/pages/spec/provider">
+    Provider abstraction: routing, fallback, cost tracking, and capability negotiation across Anthropic, OpenAI, Mistral, and DeepSeek.
+  </Card>
+  <Card title="Memory" icon="brain" href="/pages/spec/memory">
+    H2O memory primitive: hot/warm/cold tiers, automatic promotion/demotion, semantic search, and TTL management.
+  </Card>
+  <Card title="RAG" icon="magnifying-glass" href="/pages/spec/rag">
+    RAG pipeline primitive: chunking, embedding, vector indexing, retrieval, and reranking — portable across vector stores.
+  </Card>
+  <Card title="Skills" icon="bolt" href="/pages/spec/skills">
+    Skills registry: definition, versioning, discovery, streaming execution, and composition.
+  </Card>
+  <Card title="Wire Format" icon="server" href="/pages/spec/wire-format">
+    REST endpoints, SSE streaming protocol, error codes, authentication, and rate limiting.
+  </Card>
+</CardGroup>
+
+---
+
+## Versioning Policy
+
+AKP uses **semantic versioning** for both the specification and the reference SDK.
+
+- **Major** (`v1 → v2`): Breaking wire format changes. Old endpoints remain available for one release cycle.
+- **Minor** (`v0.1 → v0.2`): New primitives or endpoints added, backward-compatible.
+- **Patch** (`v0.1.0 → v0.1.1`): Bug fixes, clarifications, no behavioral changes.
+
+The wire version is embedded in the URL path: `/v1/provider/complete`, `/v1/memory/read`, etc.
+
+---
+
+<Snippet file="footer.mdx" />

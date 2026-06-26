@@ -1,0 +1,300 @@
+---
+title: "Provider Abstraction"
+description: "Unified interface for routing, fallback, and cost-aware completion across multiple LLM providers."
+icon: "cloud"
+---
+
+## Overview
+
+The **Provider primitive** abstracts LLM backends behind a single, stable interface. Your application code never imports an Anthropic SDK or an OpenAI client directly — it speaks to the AKP kernel, which handles routing, retries, fallback, and cost accounting.
+
+```
+Application → KernelClient.provider.complete() → Kernel Router
+                                                      │
+                              ┌───────────────────────┼───────────────────────┐
+                              │                       │                       │
+                    ┌─────────▼──────┐    ┌──────────▼─────┐    ┌────────────▼───┐
+                    │   Anthropic    │    │    OpenAI      │    │    Mistral     │
+                    │  claude-opus   │    │    gpt-4o      │    │  mistral-large │
+                    └────────────────┘    └────────────────┘    └────────────────┘
+```
+
+---
+
+## Core Types
+
+```typescript
+import type {
+  ProviderConfig,
+  ProviderRequest,
+  ProviderResponse,
+  ProviderStreamChunk,
+  ModelCapabilities,
+  RoutingStrategy,
+} from "@avant-dev/akp-core";
+
+// Provider configuration (set once at kernel init)
+interface ProviderConfig {
+  apiKey: string;
+  defaultModel: string;
+  baseUrl?: string;          // For self-hosted models
+  timeout?: number;          // ms, default 30000
+  maxRetries?: number;       // default 3
+  headers?: Record<string, string>;
+}
+
+// Completion request
+interface ProviderRequest {
+  messages: Message[];
+  model?: string;            // Overrides provider default
+  temperature?: number;      // 0–2, default 1
+  maxTokens?: number;
+  topP?: number;
+  stopSequences?: string[];
+  stream?: boolean;
+  responseFormat?: ResponseFormat;
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
+  metadata?: Record<string, unknown>;
+}
+
+// Completion response
+interface ProviderResponse {
+  id: string;
+  model: string;
+  provider: "anthropic" | "openai" | "mistral" | "deepseek";
+  content: string;
+  stopReason: "end_turn" | "max_tokens" | "tool_use" | "stop_sequence";
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    costUsd: number;        // Estimated cost in USD
+  };
+  toolCalls?: ToolCall[];
+  parsed?: unknown;          // If responseFormat.type === "json_schema"
+  latencyMs: number;
+}
+```
+
+---
+
+## Routing Strategies
+
+AKP supports four routing strategies, configurable per request or globally:
+
+### `primary-with-fallback` (default)
+
+Uses the first configured provider. Falls back to the next on error or timeout.
+
+```typescript
+const kernel = createKernel({
+  providers: {
+    anthropic: { apiKey: process.env.ANTHROPIC_API_KEY!, defaultModel: "claude-opus-4-5" },
+    openai: { apiKey: process.env.OPENAI_API_KEY!, defaultModel: "gpt-4o" },
+  },
+  routing: {
+    strategy: "primary-with-fallback",
+    primary: "anthropic",
+    fallbacks: ["openai"],
+    fallbackOn: ["timeout", "rate_limit", "server_error"],
+  },
+});
+```
+
+### `cost-optimized`
+
+Routes to the cheapest provider that meets the capability requirements of the request.
+
+```typescript
+const kernel = createKernel({
+  providers: { /* ... */ },
+  routing: {
+    strategy: "cost-optimized",
+    // AKP will choose deepseek for simple tasks, anthropic for complex ones
+    costThresholds: {
+      simple: 0.001,   // USD per 1K tokens — use cheapest
+      complex: 0.01,   // USD per 1K tokens — allow expensive providers
+    },
+  },
+});
+```
+
+### `latency-optimized`
+
+Sends the request to all configured providers simultaneously and returns the first response. Cancels the rest.
+
+```typescript
+const response = await kernel.provider.complete({
+  messages: [{ role: "user", content: "What time is it in Tokyo?" }],
+  routing: { strategy: "latency-optimized" },
+});
+// Returns whichever provider responds first
+console.log(`Winner: ${response.provider} (${response.latencyMs}ms)`);
+```
+
+### `round-robin`
+
+Distributes requests evenly across all configured providers. Useful for load testing.
+
+```typescript
+const kernel = createKernel({
+  providers: { anthropic: {/*...*/}, openai: {/*...*/}, mistral: {/*...*/} },
+  routing: { strategy: "round-robin" },
+});
+```
+
+---
+
+## Streaming
+
+All streaming responses implement the `AsyncIterable<ProviderStreamChunk>` interface:
+
+```typescript
+import type { ProviderStreamChunk } from "@avant-dev/akp-core";
+
+interface ProviderStreamChunk {
+  id: string;
+  type: "content_delta" | "tool_call_delta" | "usage" | "stop";
+  delta?: string;           // Text delta (type === "content_delta")
+  toolCallDelta?: {         // Partial tool call (type === "tool_call_delta")
+    id: string;
+    name?: string;
+    argumentsDelta?: string;
+  };
+  usage?: {                 // Final token counts (type === "usage")
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  };
+  stopReason?: string;      // Final chunk (type === "stop")
+}
+```
+
+```typescript
+// Streaming example
+const stream = kernel.provider.stream({
+  messages: [{ role: "user", content: "Write a haiku about distributed systems." }],
+  model: "claude-opus-4-5",
+});
+
+let fullText = "";
+for await (const chunk of stream) {
+  if (chunk.type === "content_delta" && chunk.delta) {
+    fullText += chunk.delta;
+    process.stdout.write(chunk.delta);
+  }
+  if (chunk.type === "usage") {
+    console.log(`\nCost: $${chunk.usage!.costUsd.toFixed(6)}`);
+  }
+}
+```
+
+---
+
+## Tool Calls
+
+AKP normalizes tool calling across providers that have different native formats:
+
+```typescript
+import { defineProviderTool } from "@avant-dev/akp-core";
+
+const searchTool = defineProviderTool({
+  name: "web_search",
+  description: "Search the web for current information.",
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "The search query" },
+      numResults: { type: "number", default: 5 },
+    },
+    required: ["query"],
+  },
+});
+
+const response = await kernel.provider.complete({
+  messages: [{ role: "user", content: "What is the current price of Bitcoin?" }],
+  tools: [searchTool],
+  toolChoice: "auto",
+});
+
+if (response.toolCalls?.length) {
+  for (const call of response.toolCalls) {
+    console.log(`Tool: ${call.name}`);
+    console.log(`Args: ${JSON.stringify(call.arguments)}`);
+  }
+}
+```
+
+---
+
+## Cost Tracking
+
+The Provider primitive tracks cost in real time:
+
+```typescript
+// Get cumulative cost for a kernel session
+const stats = await kernel.provider.getStats();
+console.log(stats);
+// {
+//   requests: 142,
+//   totalTokens: 284000,
+//   totalCostUsd: 1.47,
+//   byProvider: {
+//     anthropic: { requests: 98, costUsd: 1.23 },
+//     openai: { requests: 44, costUsd: 0.24 }
+//   }
+// }
+
+// Per-request cost is always in ProviderResponse.usage.costUsd
+```
+
+---
+
+## Adding a Custom Provider
+
+Implement the `ProviderAdapter` interface to add any LLM backend:
+
+```typescript
+import type { ProviderAdapter, ProviderRequest, ProviderResponse } from "@avant-dev/akp-core";
+
+class MyLocalModelAdapter implements ProviderAdapter {
+  readonly name = "my-local-model";
+  readonly capabilities = {
+    streaming: true,
+    functionCalling: false,
+    vision: false,
+    jsonMode: true,
+  };
+
+  async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    // Call your local model API
+    const res = await fetch("http://localhost:11434/api/generate", {
+      method: "POST",
+      body: JSON.stringify({ model: "llama3", prompt: request.messages.at(-1)!.content }),
+    });
+    const data = await res.json();
+    return {
+      id: crypto.randomUUID(),
+      model: "llama3",
+      provider: "my-local-model" as any,
+      content: data.response,
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+      latencyMs: 0,
+    };
+  }
+
+  async *stream(request: ProviderRequest) { /* ... */ }
+}
+
+// Register with kernel
+const kernel = createKernel({
+  adapters: [new MyLocalModelAdapter()],
+  providers: { "my-local-model": { apiKey: "local", defaultModel: "llama3" } },
+});
+```
+
+---
+
+<Snippet file="footer.mdx" />

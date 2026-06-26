@@ -1,0 +1,405 @@
+---
+title: "Building Custom Skills"
+description: "Design advanced, composable Skills with streaming output, error handling, versioning, and testing."
+icon: "bolt"
+---
+
+## Skill Design Patterns
+
+This guide covers advanced patterns for building production-grade AKP Skills:
+
+1. Streaming skills with real-time token output
+2. Error handling and graceful degradation
+3. Skill versioning and migration
+4. Skill composition patterns
+5. Testing skills in isolation
+
+---
+
+## Pattern 1: Streaming Skill with Progress
+
+Build a skill that streams output and emits structured progress events:
+
+```typescript
+import { defineSkill } from "@avant-dev/akp-core";
+import type { SkillStreamChunk } from "@avant-dev/akp-core";
+
+export const generateReportSkill = defineSkill({
+  name: "generate_report",
+  version: "1.0.0",
+  description: "Generates a structured analysis report with streaming output.",
+  streaming: true,
+  input: {
+    type: "object",
+    properties: {
+      data: {
+        type: "object",
+        description: "The data to analyze",
+      },
+      reportType: {
+        type: "string",
+        enum: ["executive", "technical", "financial"],
+        default: "executive",
+      },
+      language: {
+        type: "string",
+        enum: ["en", "es", "pt"],
+        default: "en",
+      },
+    },
+    required: ["data"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      sections: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            heading: { type: "string" },
+            content: { type: "string" },
+          },
+        },
+      },
+      summary: { type: "string" },
+    },
+    required: ["title", "sections", "summary"],
+  },
+
+  async execute({ input, kernel }) {
+    // Non-streaming fallback: collect all output then return
+    const chunks: string[] = [];
+    for await (const chunk of this.stream!({ input, kernel })) {
+      if (chunk.type === "delta" && chunk.delta) chunks.push(chunk.delta);
+      if (chunk.type === "done") return chunk.result as any;
+    }
+    throw new Error("Skill stream ended without result");
+  },
+
+  async *stream({ input, kernel, signal }): AsyncGenerator<SkillStreamChunk> {
+    // Emit thinking phase
+    yield { type: "thinking", thinking: "Analyzing input data..." };
+
+    // Phase 1: Generate title
+    yield { type: "metadata", metadata: { phase: "title", progress: 0.1 } };
+
+    const titleResponse = await kernel.provider.complete({
+      messages: [
+        {
+          role: "user",
+          content: `Generate a concise report title for this data: ${JSON.stringify(input.data)}`,
+        },
+      ],
+      maxTokens: 50,
+    });
+
+    const title = titleResponse.content.trim();
+    yield { type: "delta", delta: `# ${title}\n\n` };
+
+    // Phase 2: Generate sections with streaming
+    yield { type: "metadata", metadata: { phase: "sections", progress: 0.2 } };
+
+    const sectionPrompts = {
+      executive: ["Executive Summary", "Key Findings", "Recommendations"],
+      technical: ["Technical Overview", "Data Analysis", "Implementation Notes"],
+      financial: ["Financial Overview", "Risk Assessment", "Projections"],
+    };
+
+    const sections: Array<{ heading: string; content: string }> = [];
+    const reportSections = sectionPrompts[input.reportType ?? "executive"];
+
+    for (let i = 0; i < reportSections.length; i++) {
+      const sectionName = reportSections[i];
+
+      // Check for cancellation
+      if (signal?.aborted) {
+        yield { type: "done", result: { title, sections, summary: "Cancelled" } };
+        return;
+      }
+
+      yield {
+        type: "metadata",
+        metadata: {
+          phase: "section",
+          sectionName,
+          progress: 0.2 + (i / reportSections.length) * 0.6,
+        },
+      };
+
+      yield { type: "delta", delta: `## ${sectionName}\n\n` };
+
+      let sectionContent = "";
+      const sectionStream = kernel.provider.stream({
+        messages: [
+          {
+            role: "system",
+            content: `You are writing the "${sectionName}" section of a ${input.reportType} report in ${input.language}.`,
+          },
+          {
+            role: "user",
+            content: `Write this section (2-3 paragraphs) based on: ${JSON.stringify(input.data)}`,
+          },
+        ],
+        maxTokens: 500,
+      });
+
+      for await (const chunk of sectionStream) {
+        if (chunk.type === "content_delta" && chunk.delta) {
+          sectionContent += chunk.delta;
+          yield { type: "delta", delta: chunk.delta };
+        }
+      }
+
+      sections.push({ heading: sectionName, content: sectionContent });
+      yield { type: "delta", delta: "\n\n" };
+    }
+
+    // Phase 3: Generate summary
+    yield { type: "metadata", metadata: { phase: "summary", progress: 0.9 } };
+    yield { type: "delta", delta: "---\n\n**Summary:** " };
+
+    const summaryResponse = await kernel.provider.complete({
+      messages: [
+        {
+          role: "user",
+          content: `Write a 2-sentence summary of this report: ${sections.map(s => s.content).join(" ")}`,
+        },
+      ],
+      maxTokens: 150,
+    });
+
+    const summary = summaryResponse.content.trim();
+    yield { type: "delta", delta: summary };
+
+    // Final result
+    yield {
+      type: "done",
+      result: { title, sections, summary },
+    };
+  },
+});
+```
+
+---
+
+## Pattern 2: Error Handling and Fallback
+
+```typescript
+import { defineSkill, AkpSkillError } from "@avant-dev/akp-core";
+
+export const robustTranslationSkill = defineSkill({
+  name: "translate",
+  version: "1.0.0",
+  description: "Translates text with fallback strategies.",
+  input: {
+    type: "object",
+    properties: {
+      text: { type: "string" },
+      targetLanguage: { type: "string" },
+      sourceLanguage: { type: "string" },
+      quality: { type: "string", enum: ["fast", "standard", "premium"], default: "standard" },
+    },
+    required: ["text", "targetLanguage"],
+  },
+  output: {
+    type: "object",
+    properties: {
+      translatedText: { type: "string" },
+      detectedSourceLanguage: { type: "string" },
+      confidence: { type: "number" },
+    },
+    required: ["translatedText"],
+  },
+
+  async execute({ input, kernel }) {
+    // Validate input
+    if (input.text.length > 50_000) {
+      throw new AkpSkillError({
+        code: "INPUT_TOO_LONG",
+        message: `Text length ${input.text.length} exceeds maximum of 50,000 characters.`,
+        input,
+      });
+    }
+
+    const modelsByQuality = {
+      fast: "claude-haiku-4-5",
+      standard: "claude-sonnet-4-5",
+      premium: "claude-opus-4-5",
+    };
+
+    const model = modelsByQuality[input.quality ?? "standard"];
+
+    try {
+      const response = await kernel.provider.complete({
+        messages: [
+          {
+            role: "system",
+            content: "You are a professional translator. Return only the translated text and metadata as JSON.",
+          },
+          {
+            role: "user",
+            content: [
+              `Translate the following text to ${input.targetLanguage}.`,
+              input.sourceLanguage
+                ? `Source language: ${input.sourceLanguage}`
+                : "Detect the source language.",
+              `\nText:\n${input.text}`,
+            ].join("\n"),
+          },
+        ],
+        model,
+        responseFormat: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              translatedText: { type: "string" },
+              detectedSourceLanguage: { type: "string" },
+              confidence: { type: "number" },
+            },
+            required: ["translatedText", "detectedSourceLanguage", "confidence"],
+          },
+        },
+      });
+
+      return response.parsed as {
+        translatedText: string;
+        detectedSourceLanguage: string;
+        confidence: number;
+      };
+    } catch (error) {
+      // Fallback: try with a simpler prompt if response format fails
+      if (error instanceof Error && error.message.includes("response_format")) {
+        const fallback = await kernel.provider.complete({
+          messages: [
+            {
+              role: "user",
+              content: `Translate to ${input.targetLanguage}: ${input.text}`,
+            },
+          ],
+          model,
+        });
+
+        return {
+          translatedText: fallback.content,
+          detectedSourceLanguage: "unknown",
+          confidence: 0.5,
+        };
+      }
+      throw error;
+    }
+  },
+});
+```
+
+---
+
+## Pattern 3: Skill Versioning
+
+AKP supports running multiple versions of the same skill simultaneously:
+
+```typescript
+// v1: simple summarization
+export const summarizeV1 = defineSkill({
+  name: "summarize",
+  version: "1.0.0",
+  async execute({ input, kernel }) {
+    const r = await kernel.provider.complete({ messages: [{ role: "user", content: `Summarize: ${input.text}` }] });
+    return { bullets: r.content.split("\n").filter(Boolean) };
+  },
+  // ...
+});
+
+// v2: adds language detection and confidence scoring
+export const summarizeV2 = defineSkill({
+  name: "summarize",
+  version: "2.0.0",
+  async execute({ input, kernel }) {
+    // New implementation with improved prompting
+    const r = await kernel.provider.complete({
+      messages: [
+        { role: "system", content: "You are a precise summarization assistant. Return JSON." },
+        { role: "user", content: `Summarize into ${input.maxBullets ?? 5} bullets:\n\n${input.text}` },
+      ],
+      responseFormat: { type: "json_schema", schema: { /* ... */ } },
+    });
+    return r.parsed;
+  },
+  // ...
+});
+
+// Register both
+kernel.skills.register(summarizeV1);
+kernel.skills.register(summarizeV2);
+
+// Invoke specific version
+await kernel.skills.invoke("summarize@1.0.0", { text: "..." });  // Uses v1
+await kernel.skills.invoke("summarize@2.0.0", { text: "..." });  // Uses v2
+await kernel.skills.invoke("summarize", { text: "..." });         // Uses latest (v2)
+```
+
+---
+
+## Pattern 4: Testing Skills
+
+Test skills in isolation using the AKP test utilities:
+
+```typescript
+// skills/__tests__/summarize.test.ts
+import { describe, it, expect, vi } from "vitest";
+import { createTestKernel } from "@avant-dev/akp-core/testing";
+import { summarizeSkill } from "../summarize";
+
+describe("summarize skill", () => {
+  it("returns bullet points from text", async () => {
+    const kernel = createTestKernel({
+      // Mock the provider so tests don't hit real APIs
+      provider: {
+        complete: vi.fn().mockResolvedValue({
+          content: "",
+          parsed: { bullets: ["Point 1", "Point 2", "Point 3"] },
+          usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.001 },
+        }),
+      },
+    });
+
+    kernel.skills.register(summarizeSkill);
+
+    const result = await kernel.skills.invoke("summarize", {
+      text: "The quick brown fox jumps over the lazy dog.",
+      maxBullets: 3,
+    });
+
+    expect(result.bullets).toHaveLength(3);
+    expect(result.bullets[0]).toBe("Point 1");
+  });
+
+  it("handles empty text gracefully", async () => {
+    const kernel = createTestKernel({ provider: { complete: vi.fn() } });
+    kernel.skills.register(summarizeSkill);
+
+    await expect(
+      kernel.skills.invoke("summarize", { text: "" })
+    ).rejects.toThrow("text");
+  });
+
+  it("respects maxBullets parameter", async () => {
+    const mockComplete = vi.fn().mockResolvedValue({
+      parsed: { bullets: ["A", "B"] },
+    });
+    const kernel = createTestKernel({ provider: { complete: mockComplete } });
+    kernel.skills.register(summarizeSkill);
+
+    await kernel.skills.invoke("summarize", { text: "Some long text...", maxBullets: 2 });
+
+    const callArg = mockComplete.mock.calls[0][0];
+    expect(callArg.messages[0].content).toContain("2");
+  });
+});
+```
+
+---
+
+<Snippet file="footer.mdx" />

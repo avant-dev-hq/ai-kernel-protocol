@@ -1,0 +1,460 @@
+---
+title: "REST API Reference"
+description: "Complete reference for all AKP kernel REST endpoints, parameters, and response schemas."
+icon: "terminal"
+---
+
+## Base URL
+
+```
+https://your-kernel.example.com/v1
+```
+
+For local development: `http://localhost:8080/v1`
+
+## Authentication
+
+Use the `Authorization` header with your AKP API key. The format is `Authorization: [Bearer] <your-api-key>`, where `<your-api-key>` starts with `akp_sk_live_` (server), `akp_pk_live_` (client), or `akp_sk_dev_` (development).
+
+```http
+Authorization: [Bearer] <akp_sk_live_your_key_here>
+```
+
+---
+
+## Provider API
+
+### Complete
+
+<ParamField path="POST /v1/provider/complete" />
+
+Non-streaming LLM completion.
+
+**Request body:**
+
+<ParamField body="messages" type="Message[]" required>
+  Array of conversation messages. Each message has `role` ("system" | "user" | "assistant") and `content` (string).
+</ParamField>
+
+<ParamField body="model" type="string">
+  Model identifier. Defaults to the provider's `defaultModel`.
+  Examples: `"claude-opus-4-5"`, `"gpt-4o"`, `"mistral-large-2"`, `"deepseek-chat"`
+</ParamField>
+
+<ParamField body="temperature" type="number">
+  Sampling temperature. Range: `0–2`. Default: `1`.
+</ParamField>
+
+<ParamField body="maxTokens" type="number">
+  Maximum output tokens. Provider-specific limits apply.
+</ParamField>
+
+<ParamField body="topP" type="number">
+  Nucleus sampling probability. Range: `0–1`.
+</ParamField>
+
+<ParamField body="stopSequences" type="string[]">
+  Sequences at which the model stops generating.
+</ParamField>
+
+<ParamField body="responseFormat" type="object">
+  Response format configuration.
+  - `{ "type": "text" }` — plain text (default)
+  - `{ "type": "json_schema", "schema": {...} }` — structured JSON output
+</ParamField>
+
+<ParamField body="tools" type="ToolDefinition[]">
+  Tool definitions for function calling.
+</ParamField>
+
+<ParamField body="toolChoice" type="string | object">
+  Tool selection: `"none"` | `"auto"` | `"required"` | `{ "type": "tool", "name": "..." }`
+</ParamField>
+
+<ParamField body="routing" type="object">
+  Per-request routing override.
+  - `strategy`: `"primary-with-fallback"` | `"cost-optimized"` | `"latency-optimized"` | `"round-robin"`
+</ParamField>
+
+<ParamField body="memoryInjection" type="object">
+  Automatically inject memory into context.
+  - `enabled`: boolean
+  - `tiers`: `MemoryTier[]`
+  - `query`: string (semantic search query)
+  - `maxTokens`: number
+</ParamField>
+
+**Response `200 OK`:**
+
+```json
+{
+  "id": "resp_01AbcXyz",
+  "model": "claude-opus-4-5",
+  "provider": "anthropic",
+  "content": "The response text...",
+  "stopReason": "end_turn",
+  "toolCalls": null,
+  "parsed": null,
+  "usage": {
+    "inputTokens": 128,
+    "outputTokens": 256,
+    "totalTokens": 384,
+    "costUsd": 0.00892
+  },
+  "latencyMs": 1243
+}
+```
+
+---
+
+### Stream
+
+<ParamField path="POST /v1/provider/stream" />
+
+Streaming LLM completion via SSE.
+
+**Request body:** Same as `/complete`.
+
+**Response:** `Content-Type: text/event-stream` with SSE events. See [Wire Format](/pages/spec/wire-format#streaming) for event schema.
+
+---
+
+### Get Stats
+
+<ParamField path="GET /v1/provider/stats" />
+
+Get cumulative usage statistics for this API key.
+
+**Response `200 OK`:**
+
+```json
+{
+  "requests": 1847,
+  "totalTokens": 3841024,
+  "totalCostUsd": 42.18,
+  "byProvider": {
+    "anthropic": { "requests": 1200, "tokens": 2560000, "costUsd": 35.84 },
+    "openai": { "requests": 647, "tokens": 1281024, "costUsd": 6.34 }
+  },
+  "period": { "from": "2025-01-01T00:00:00Z", "to": "2025-01-15T23:59:59Z" }
+}
+```
+
+---
+
+## Memory API
+
+### Write
+
+<ParamField path="POST /v1/memory/write" />
+
+<ParamField body="tier" type="string" required>
+  Memory tier: `"hot"` | `"warm"` | `"cold"`
+</ParamField>
+
+<ParamField body="key" type="string" required>
+  Unique key. Convention: `{entity}:{id}:{field}` e.g., `"user:42:preferences"`
+</ParamField>
+
+<ParamField body="value" type="any" required>
+  Value to store. Must be JSON-serializable.
+</ParamField>
+
+<ParamField body="ttl" type="number">
+  Time-to-live in seconds. Omit for no expiry (cold tier only).
+</ParamField>
+
+<ParamField body="tags" type="string[]">
+  Tags for bulk operations (delete by tag, search by tag).
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Arbitrary metadata attached to the entry.
+</ParamField>
+
+**Response `200 OK`:**
+
+```json
+{
+  "ok": true,
+  "key": "user:42:preferences",
+  "tier": "warm",
+  "expiresAt": "2025-01-15T15:00:00Z"
+}
+```
+
+---
+
+### Read
+
+<ParamField path="GET /v1/memory/read" />
+
+<ParamField query="key" type="string" required>
+  Memory key to retrieve.
+</ParamField>
+
+<ParamField query="tiers" type="string">
+  Comma-separated tiers to search, in order. Default: `"hot,warm,cold"`
+</ParamField>
+
+**Response `200 OK` (found):**
+
+```json
+{
+  "found": true,
+  "entry": {
+    "key": "user:42:preferences",
+    "value": { "theme": "dark" },
+    "tier": "warm",
+    "tags": ["user"],
+    "createdAt": "2025-01-15T14:00:00Z",
+    "expiresAt": "2025-01-15T15:00:00Z",
+    "accessCount": 7,
+    "lastAccessedAt": "2025-01-15T14:42:00Z"
+  }
+}
+```
+
+**Response `200 OK` (not found):**
+
+```json
+{ "found": false }
+```
+
+---
+
+### Search
+
+<ParamField path="POST /v1/memory/search" />
+
+Semantic search over memory entries (requires RAG embedder configured).
+
+<ParamField body="query" type="string" required>
+  Natural language search query.
+</ParamField>
+
+<ParamField body="tiers" type="string[]">
+  Tiers to search. Default: `["hot", "warm", "cold"]`
+</ParamField>
+
+<ParamField body="tags" type="string[]">
+  Filter by tags (AND condition).
+</ParamField>
+
+<ParamField body="limit" type="number">
+  Maximum results to return. Default: `10`
+</ParamField>
+
+<ParamField body="minScore" type="number">
+  Minimum cosine similarity score (0–1). Default: `0.5`
+</ParamField>
+
+---
+
+### Delete
+
+<ParamField path="DELETE /v1/memory/delete" />
+
+<ParamField body="key" type="string" required>
+  Key to delete.
+</ParamField>
+
+<ParamField body="tier" type="string">
+  Delete from a specific tier only. Omit to delete from all tiers.
+</ParamField>
+
+---
+
+### Delete by Tag
+
+<ParamField path="DELETE /v1/memory/delete-by-tag" />
+
+<ParamField body="tag" type="string" required>
+  Tag to match.
+</ParamField>
+
+<ParamField body="tier" type="string">
+  Delete from specific tier only.
+</ParamField>
+
+**Response `200 OK`:**
+
+```json
+{ "ok": true, "deleted": 47 }
+```
+
+---
+
+## RAG API
+
+### Ingest
+
+<ParamField path="POST /v1/rag/ingest" />
+
+Ingest a single document (chunk → embed → index).
+
+<ParamField body="document.id" type="string" required>
+  Unique document identifier.
+</ParamField>
+
+<ParamField body="document.content" type="string" required>
+  Document text content.
+</ParamField>
+
+<ParamField body="document.mimeType" type="string">
+  `"text/plain"` | `"text/markdown"` | `"text/html"` | `"application/pdf"`. Default: `"text/plain"`
+</ParamField>
+
+<ParamField body="document.metadata" type="object">
+  Metadata attached to all chunks from this document.
+</ParamField>
+
+<ParamField body="document.source" type="string">
+  Source URL or file path (for attribution).
+</ParamField>
+
+**Response `200 OK`:**
+
+```json
+{
+  "ok": true,
+  "documentId": "doc-001",
+  "chunksCreated": 8,
+  "embeddingsGenerated": 8,
+  "latencyMs": 3241
+}
+```
+
+---
+
+### Ingest Batch
+
+<ParamField path="POST /v1/rag/ingest-batch" />
+
+<ParamField body="documents" type="RagDocument[]" required>
+  Array of documents to ingest. Processed concurrently in batches.
+</ParamField>
+
+---
+
+### Ingest URL
+
+<ParamField path="POST /v1/rag/ingest-url" />
+
+<ParamField body="url" type="string" required>
+  URL to fetch and ingest. Supports HTTP/HTTPS. PDFs are converted automatically.
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Additional metadata to attach.
+</ParamField>
+
+---
+
+### Search
+
+<ParamField path="POST /v1/rag/search" />
+
+<ParamField body="query" type="string" required>
+  Natural language search query.
+</ParamField>
+
+<ParamField body="limit" type="number">
+  Maximum results. Default: `10`
+</ParamField>
+
+<ParamField body="minScore" type="number">
+  Minimum similarity score. Default: `0.5`
+</ParamField>
+
+<ParamField body="mode" type="string">
+  `"semantic"` | `"keyword"` | `"hybrid"`. Default: `"semantic"`
+</ParamField>
+
+<ParamField body="hybridAlpha" type="number">
+  Hybrid blend: 0 = keyword only, 1 = semantic only. Default: `0.7`
+</ParamField>
+
+<ParamField body="filter" type="object">
+  Filter results by `metadata` (exact match) or `documentIds` (restrict to specific docs).
+</ParamField>
+
+<ParamField body="rerank" type="boolean">
+  Whether to apply the configured reranker. Default: `true`
+</ParamField>
+
+---
+
+### Delete Document
+
+<ParamField path="DELETE /v1/rag/documents/{documentId}" />
+
+Deletes all chunks and embeddings for a document.
+
+---
+
+## Skills API
+
+### List Skills
+
+<ParamField path="GET /v1/skills" />
+
+Returns all registered skills with metadata and input schemas.
+
+---
+
+### Invoke Skill
+
+<ParamField path="POST /v1/skills/{name}/invoke" />
+
+<ParamField path="name" type="string" required>
+  Skill name, optionally with version: `"summarize"` or `"summarize@1.0.0"`
+</ParamField>
+
+<ParamField body="input" type="object" required>
+  Skill input. Must conform to the skill's input JSON Schema.
+</ParamField>
+
+<ParamField body="sessionId" type="string">
+  Session identifier for memory context.
+</ParamField>
+
+<ParamField body="userId" type="string">
+  User identifier for personalization.
+</ParamField>
+
+---
+
+### Stream Skill
+
+<ParamField path="POST /v1/skills/{name}/stream" />
+
+Same as invoke, but returns SSE stream. Only available for skills with `streaming: true`.
+
+---
+
+## Health API
+
+### Health Check
+
+<ParamField path="GET /health" />
+
+**Response `200 OK`:**
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime": 86400,
+  "components": {
+    "providers": { "anthropic": "ok", "openai": "ok" },
+    "memory": { "hot": "ok", "warm": "ok", "cold": "ok" },
+    "rag": { "embedder": "ok", "vectorStore": "ok" },
+    "skills": { "registered": 5 }
+  }
+}
+```
+
+---
+
+<Snippet file="footer.mdx" />

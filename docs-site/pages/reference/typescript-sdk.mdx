@@ -1,0 +1,406 @@
+---
+title: "TypeScript SDK Reference"
+description: "Complete API reference for the @avant-dev/akp-core package."
+icon: "code"
+---
+
+## Installation
+
+```bash
+npm install @avant-dev/akp-core
+# Peer dependencies (install based on adapters you use)
+npm install ioredis pg pgvector
+```
+
+## Package Exports
+
+```typescript
+// Main entry point
+import {
+  createKernel,
+  defineSkill,
+  KernelClient,
+  KernelServer,
+} from "@avant-dev/akp-core";
+
+// Type imports
+import type {
+  KernelConfig,
+  ProviderRequest,
+  ProviderResponse,
+  MemoryEntry,
+  RagDocument,
+  SkillDefinition,
+} from "@avant-dev/akp-core";
+
+// Server-specific (Node.js only)
+import { KernelServer } from "@avant-dev/akp-core/server";
+
+// Testing utilities
+import { createTestKernel, MockProvider } from "@avant-dev/akp-core/testing";
+
+// Evaluation utilities
+import { RagEvaluator } from "@avant-dev/akp-core/evaluation";
+```
+
+---
+
+## `createKernel(config: KernelConfig): Kernel`
+
+Creates and initializes a kernel instance with the given configuration.
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({
+  providers: {
+    anthropic: {
+      apiKey: string;          // Required
+      defaultModel?: string;   // Default: "claude-opus-4-5"
+      baseUrl?: string;
+      timeout?: number;
+      maxRetries?: number;
+    };
+    openai?: { /* same shape */ };
+    mistral?: { /* same shape */ };
+    deepseek?: { /* same shape */ };
+  };
+
+  routing?: {
+    strategy: "primary-with-fallback" | "cost-optimized" | "latency-optimized" | "round-robin";
+    primary?: string;              // Provider name
+    fallbacks?: string[];
+    fallbackOn?: Array<"timeout" | "rate_limit" | "server_error" | "invalid_request">;
+  };
+
+  memory?: {
+    hot?: {
+      maxTokens?: number;          // Default: 8192
+      maxEntries?: number;         // Default: 1000
+    };
+    warm?: {
+      adapter: "redis" | "upstash-redis";
+      url?: string;                // Redis URL (required for "redis")
+      restUrl?: string;            // Upstash REST URL
+      restToken?: string;          // Upstash REST token
+      ttl?: number;                // Default TTL in seconds
+      keyPrefix?: string;
+    };
+    cold?: {
+      adapter: "postgres" | "s3" | "sqlite";
+      url?: string;                // Connection string
+      table?: string;
+    };
+    promotion?: {
+      coldToWarm?: { accessesIn: { count: number; windowSecs: number } };
+      warmToHot?: { accessesIn: { count: number; windowSecs: number } };
+    };
+    demotion?: {
+      hotToWarm?: { idleSecs: number };
+      warmToCold?: { idleSecs: number };
+    };
+  };
+
+  rag?: {
+    chunker?: {
+      strategy: "fixed" | "recursive" | "semantic" | "markdown";
+      chunkSize?: number;
+      chunkOverlap?: number;
+      separators?: string[];
+      splitOnHeadings?: string[];
+    };
+    embedder?: {
+      provider: "openai" | "anthropic" | "cohere";
+      model: string;
+      dimensions?: number;
+      batchSize?: number;
+      apiKey?: string;
+    };
+    vectorStore?: {
+      adapter: "pgvector" | "pinecone" | "qdrant" | "chroma" | "weaviate" | "memory";
+      url?: string;
+      table?: string;
+      dimensions?: number;
+      indexType?: "ivfflat" | "hnsw";
+      apiKey?: string;
+      index?: string;
+      namespace?: string;
+      fullTextSearch?: {
+        enabled: boolean;
+        language?: string;
+      };
+    };
+    reranker?: {
+      provider: "cohere" | "voyageai";
+      model: string;
+      apiKey: string;
+      topN?: number;
+    };
+  };
+
+  mcp?: {
+    enabled: boolean;
+    path?: string;                // Default: "/mcp"
+    exposeMemoryAsResources?: boolean;
+  };
+
+  observability?: {
+    opentelemetry?: {
+      enabled: boolean;
+      serviceName?: string;
+      exporterUrl?: string;
+    };
+  };
+});
+```
+
+---
+
+## `Kernel`
+
+The main kernel instance returned by `createKernel()`.
+
+### `kernel.provider`
+
+```typescript
+// Complete (non-streaming)
+await kernel.provider.complete(request: ProviderRequest): Promise<ProviderResponse>
+
+// Stream
+kernel.provider.stream(request: ProviderRequest): AsyncIterable<ProviderStreamChunk>
+
+// Get usage statistics
+await kernel.provider.getStats(): Promise<ProviderStats>
+
+// List available providers
+kernel.provider.listProviders(): ProviderInfo[]
+```
+
+### `kernel.memory`
+
+```typescript
+// Write
+await kernel.memory.write<T>(options: MemoryWriteOptions<T>): Promise<void>
+
+// Read (returns null if not found)
+await kernel.memory.read<T>(options: MemoryReadOptions): Promise<MemoryEntry<T> | null>
+
+// Semantic search
+await kernel.memory.search(options: MemorySearchOptions): Promise<MemorySearchResult[]>
+
+// Delete by key
+await kernel.memory.delete(options: { key: string; tier?: MemoryTier }): Promise<void>
+
+// Delete by tag
+await kernel.memory.deleteByTag(options: { tag: string; tier?: MemoryTier }): Promise<number>
+
+// Delete by pattern
+await kernel.memory.deleteByPattern(options: { pattern: string; tier?: MemoryTier }): Promise<number>
+
+// Get entry metadata without value
+await kernel.memory.stat(options: { key: string }): Promise<MemoryEntryStat | null>
+```
+
+### `kernel.rag`
+
+```typescript
+// Ingest a document
+await kernel.rag.ingest(options: { document: RagDocument }): Promise<IngestResult>
+
+// Ingest multiple documents
+await kernel.rag.ingestBatch(options: { documents: RagDocument[] }): Promise<BatchIngestResult>
+
+// Ingest from URL
+await kernel.rag.ingestUrl(options: { url: string; metadata?: Record<string, unknown> }): Promise<IngestResult>
+
+// Search
+await kernel.rag.search(options: RagSearchOptions): Promise<RagSearchResult[]>
+
+// Rerank a list of chunks
+await kernel.rag.rerank(options: { query: string; chunks: RagChunk[]; topN?: number }): Promise<RagSearchResult[]>
+
+// Delete document and all its chunks
+await kernel.rag.deleteDocument(documentId: string): Promise<void>
+
+// Update document metadata
+await kernel.rag.updateMetadata(documentId: string, metadata: Record<string, unknown>): Promise<void>
+
+// Get document info
+await kernel.rag.getDocument(documentId: string): Promise<RagDocument | null>
+```
+
+### `kernel.skills`
+
+```typescript
+// Register a skill
+kernel.skills.register(skill: SkillDefinition): void
+
+// Unregister a skill
+kernel.skills.unregister(name: string, version?: string): void
+
+// Invoke a skill
+await kernel.skills.invoke<TInput, TOutput>(
+  name: string,
+  input: TInput,
+  options?: { sessionId?: string; userId?: string; metadata?: Record<string, unknown> }
+): Promise<TOutput>
+
+// Stream a skill
+kernel.skills.stream<TInput, TOutput>(
+  name: string,
+  input: TInput,
+  options?: { sessionId?: string; signal?: AbortSignal }
+): AsyncIterable<SkillStreamChunk<TOutput>>
+
+// List registered skills
+kernel.skills.list(): SkillInfo[]
+
+// Check if skill exists
+kernel.skills.has(nameWithVersion: string): boolean
+
+// Get skill definition
+kernel.skills.get(name: string): SkillDefinition | null
+```
+
+---
+
+## `defineSkill<TInput, TOutput>(definition)`
+
+Type-safe skill definition helper.
+
+```typescript
+import { defineSkill } from "@avant-dev/akp-core";
+
+const mySkill = defineSkill({
+  name: "my_skill",
+  version: "1.0.0",
+  description: "...",
+  tags: ["category"],
+  input: { /* JSON Schema */ },
+  output: { /* JSON Schema */ },
+  streaming: false,
+
+  async execute({ input, kernel, sessionId, userId, metadata, signal }) {
+    // input is typed as TInput
+    // return type must match TOutput
+  },
+
+  // Optional streaming implementation
+  async *stream({ input, kernel, signal }) {
+    yield { type: "delta", delta: "..." };
+    yield { type: "done", result: { /* TOutput */ } };
+  },
+});
+```
+
+---
+
+## `KernelClient`
+
+Client for connecting to a remote AKP kernel over HTTP.
+
+```typescript
+import { KernelClient } from "@avant-dev/akp-core";
+
+const client = new KernelClient({
+  baseUrl: "https://your-kernel.example.com",
+  apiKey: "akp_sk_live_...",
+  timeout?: number,          // Default: 30000ms
+  retries?: number,          // Default: 3
+  headers?: Record<string, string>,
+});
+
+// Same API as kernel.provider, kernel.memory, kernel.rag, kernel.skills
+await client.provider.complete({ messages: [...] });
+await client.memory.write({ tier: "warm", key: "...", value: { } });
+await client.rag.search({ query: "..." });
+await client.skills.invoke("summarize", { text: "..." });
+```
+
+---
+
+## `KernelServer`
+
+HTTP server wrapper for the kernel (Node.js only).
+
+```typescript
+import { KernelServer } from "@avant-dev/akp-core/server";
+
+const server = new KernelServer({
+  kernel,                    // Kernel instance
+  port?: number,             // Default: 8080
+  host?: string,             // Default: "0.0.0.0"
+  cors?: {
+    origin: string | string[];
+    credentials?: boolean;
+  };
+  auth?: {
+    keys: string[];          // API keys allowed to authenticate
+    // Or custom auth middleware:
+    middleware?: (req: Request) => Promise<{ userId?: string } | null>;
+  };
+  rateLimit?: {
+    windowMs: number;
+    max: number;
+  };
+  logging?: {
+    level: "debug" | "info" | "warn" | "error";
+  };
+});
+
+await server.start(): Promise<void>
+await server.stop(): Promise<void>
+server.port: number
+server.url: string
+```
+
+---
+
+## `AkpSkillError`
+
+Structured error for skill validation and execution failures.
+
+```typescript
+import { AkpSkillError } from "@avant-dev/akp-core";
+
+throw new AkpSkillError({
+  code: "CUSTOM_ERROR_CODE",      // Will appear in error.code
+  message: "Human-readable message",
+  input: input,                   // Include the problematic input
+  cause?: Error,                  // Underlying error if any
+});
+```
+
+---
+
+## Testing Utilities
+
+```typescript
+import { createTestKernel, MockProvider } from "@avant-dev/akp-core/testing";
+import { vi } from "vitest";
+
+const kernel = createTestKernel({
+  provider: {
+    complete: vi.fn().mockResolvedValue({
+      id: "test-id",
+      model: "claude-opus-4-5",
+      provider: "anthropic",
+      content: "Mocked response",
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 20, totalTokens: 30, costUsd: 0.001 },
+      latencyMs: 100,
+    }),
+    stream: vi.fn().mockImplementation(async function*() {
+      yield { id: "test", type: "content_delta", delta: "Mocked " };
+      yield { id: "test", type: "content_delta", delta: "response" };
+      yield { id: "test", type: "stop", stopReason: "end_turn" };
+    }),
+  },
+  // Memory uses in-process Map (no Redis/PostgreSQL needed)
+  // RAG uses in-process vector store (no pgvector needed)
+});
+```
+
+---
+
+<Snippet file="footer.mdx" />

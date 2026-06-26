@@ -1,0 +1,576 @@
+---
+title: "iOS Swift Client"
+description: "Connect your native iOS app to an AKP kernel using URLSession — streaming, memory, and skills."
+icon: "apple"
+---
+
+## Overview
+
+This guide shows how to build a native iOS client that connects to an AKP kernel using Swift and URLSession. No third-party SDKs required — just the AKP REST and SSE wire format.
+
+**Minimum target:** iOS 16.0 / Swift 5.9  
+**Dependencies:** None (pure URLSession + Combine)
+
+---
+
+## AKP Swift Client
+
+Create `Sources/AKP/AKPClient.swift`:
+
+```swift
+import Foundation
+
+/// A lightweight Swift client for the AKP kernel REST API.
+public final class AKPClient: Sendable {
+    private let baseURL: URL
+    private let apiKey: String
+    private let session: URLSession
+
+    public init(baseURL: URL, apiKey: String, session: URLSession = .shared) {
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.session = session
+    }
+
+    // MARK: - Provider
+
+    /// Complete a prompt (non-streaming).
+    public func complete(request: ProviderRequest) async throws -> ProviderResponse {
+        try await post(path: "/v1/provider/complete", body: request)
+    }
+
+    // MARK: - Memory
+
+    /// Write a value to memory.
+    public func memoryWrite(_ request: MemoryWriteRequest) async throws -> MemoryWriteResponse {
+        try await post(path: "/v1/memory/write", body: request)
+    }
+
+    /// Read a value from memory.
+    public func memoryRead(key: String, tiers: [MemoryTier] = [.hot, .warm, .cold]) async throws -> MemoryReadResponse {
+        let tiersParam = tiers.map(\.rawValue).joined(separator: ",")
+        return try await get(path: "/v1/memory/read?key=\(key)&tiers=\(tiersParam)")
+    }
+
+    // MARK: - Skills
+
+    /// Invoke a skill and return the result.
+    public func invokeSkill<T: Decodable>(
+        name: String,
+        input: some Encodable,
+        sessionId: String? = nil
+    ) async throws -> SkillResponse<T> {
+        let body = SkillInvokeRequest(input: AnyEncodable(input), sessionId: sessionId)
+        return try await post(path: "/v1/skills/\(name)/invoke", body: body)
+    }
+
+    // MARK: - Private Helpers
+
+    private func post<Req: Encodable, Res: Decodable>(path: String, body: Req) async throws -> Res {
+        var request = makeRequest(path: path)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.akp.encode(body)
+        return try await send(request)
+    }
+
+    private func get<Res: Decodable>(path: String) async throws -> Res {
+        var request = makeRequest(path: path)
+        request.httpMethod = "GET"
+        return try await send(request)
+    }
+
+    private func send<Res: Decodable>(_ request: URLRequest) async throws -> Res {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AKPError.invalidResponse
+        }
+        if http.statusCode >= 400 {
+            let err = try? JSONDecoder.akp.decode(AKPErrorResponse.self, from: data)
+            throw AKPError.api(code: err?.error.code ?? "UNKNOWN",
+                               message: err?.error.message ?? "HTTP \(http.statusCode)")
+        }
+        return try JSONDecoder.akp.decode(Res.self, from: data)
+    }
+
+    private func makeRequest(path: String) -> URLRequest {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        // Authorization header format: "******"
+        // apiKey should be the full key string e.g. "akp_sk_live_..."
+        request.setValue("[Bearer] \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("akp-swift-client/0.1", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 30
+        return request
+    }
+}
+```
+
+---
+
+## Streaming with AsyncSequence
+
+Create `Sources/AKP/AKPStreamingClient.swift`:
+
+```swift
+import Foundation
+
+extension AKPClient {
+    /// Stream a completion response as an AsyncSequence of SSE events.
+    public func stream(request: ProviderRequest) -> AsyncThrowingStream<ProviderStreamChunk, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    var urlRequest = makeRequest(path: "/v1/provider/stream")
+                    urlRequest.httpMethod = "POST"
+                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    urlRequest.httpBody = try JSONEncoder.akp.encode(request)
+
+                    let (bytes, _) = try await session.bytes(for: urlRequest)
+
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data: ") else { continue }
+                        let payload = String(line.dropFirst(6))
+
+                        if payload == "[DONE]" {
+                            continuation.finish()
+                            return
+                        }
+
+                        guard let data = payload.data(using: .utf8),
+                              let chunk = try? JSONDecoder.akp.decode(ProviderStreamChunk.self, from: data)
+                        else { continue }
+
+                        continuation.yield(chunk)
+                    }
+
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Stream a skill and return typed output chunks.
+    public func streamSkill<T: Decodable>(
+        name: String,
+        input: some Encodable,
+        sessionId: String? = nil
+    ) -> AsyncThrowingStream<SkillStreamChunk<T>, Error> {
+        AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    let body = SkillInvokeRequest(input: AnyEncodable(input), sessionId: sessionId)
+                    var urlRequest = makeRequest(path: "/v1/skills/\(name)/stream")
+                    urlRequest.httpMethod = "POST"
+                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    urlRequest.httpBody = try JSONEncoder.akp.encode(body)
+
+                    let (bytes, _) = try await session.bytes(for: urlRequest)
+
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data: ") else { continue }
+                        let payload = String(line.dropFirst(6))
+                        if payload == "[DONE]" { continuation.finish(); return }
+
+                        guard let data = payload.data(using: .utf8),
+                              let chunk = try? JSONDecoder.akp.decode(SkillStreamChunk<T>.self, from: data)
+                        else { continue }
+
+                        continuation.yield(chunk)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## Model Types
+
+Create `Sources/AKP/Models.swift`:
+
+```swift
+import Foundation
+
+// MARK: - Provider
+
+public struct ProviderRequest: Encodable {
+    public let messages: [Message]
+    public let model: String?
+    public let temperature: Double?
+    public let maxTokens: Int?
+    public let stream: Bool?
+
+    public init(
+        messages: [Message],
+        model: String? = nil,
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        stream: Bool? = nil
+    ) {
+        self.messages = messages
+        self.model = model
+        self.temperature = temperature
+        self.maxTokens = maxTokens
+        self.stream = stream
+    }
+}
+
+public struct Message: Codable {
+    public let role: String
+    public let content: String
+
+    public init(role: String, content: String) {
+        self.role = role
+        self.content = content
+    }
+
+    public static func user(_ content: String) -> Message { .init(role: "user", content: content) }
+    public static func system(_ content: String) -> Message { .init(role: "system", content: content) }
+    public static func assistant(_ content: String) -> Message { .init(role: "assistant", content: content) }
+}
+
+public struct ProviderResponse: Decodable {
+    public let id: String
+    public let model: String
+    public let provider: String
+    public let content: String
+    public let stopReason: String
+    public let usage: Usage
+    public let latencyMs: Int
+}
+
+public struct ProviderStreamChunk: Decodable {
+    public let id: String
+    public let type: ChunkType
+    public let delta: String?
+    public let usage: Usage?
+    public let stopReason: String?
+
+    public enum ChunkType: String, Decodable {
+        case contentDelta = "content_delta"
+        case usage
+        case stop
+    }
+}
+
+public struct Usage: Decodable {
+    public let inputTokens: Int
+    public let outputTokens: Int
+    public let costUsd: Double
+}
+
+// MARK: - Memory
+
+public enum MemoryTier: String, Codable {
+    case hot, warm, cold
+}
+
+public struct MemoryWriteRequest: Encodable {
+    public let tier: MemoryTier
+    public let key: String
+    public let value: AnyEncodable
+    public let ttl: Int?
+    public let tags: [String]?
+}
+
+public struct MemoryWriteResponse: Decodable {
+    public let ok: Bool
+    public let key: String
+    public let tier: MemoryTier
+    public let expiresAt: Date?
+}
+
+public struct MemoryReadResponse: Decodable {
+    public let found: Bool
+    public let entry: MemoryEntry?
+}
+
+public struct MemoryEntry: Decodable {
+    public let key: String
+    public let tier: MemoryTier
+    public let createdAt: Date
+    public let expiresAt: Date?
+    public let accessCount: Int
+}
+
+// MARK: - Skills
+
+public struct SkillInvokeRequest: Encodable {
+    public let input: AnyEncodable
+    public let sessionId: String?
+}
+
+public struct SkillResponse<T: Decodable>: Decodable {
+    public let ok: Bool
+    public let skill: String
+    public let version: String
+    public let output: T
+    public let latencyMs: Int
+    public let usage: Usage
+}
+
+public struct SkillStreamChunk<T: Decodable>: Decodable {
+    public let type: ChunkType
+    public let delta: String?
+    public let result: T?
+
+    public enum ChunkType: String, Decodable {
+        case delta, thinking, metadata, done
+    }
+}
+
+// MARK: - Errors
+
+public enum AKPError: LocalizedError {
+    case invalidResponse
+    case api(code: String, message: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidResponse: return "Invalid response from AKP kernel"
+        case .api(let code, let message): return "[\(code)] \(message)"
+        }
+    }
+}
+
+public struct AKPErrorResponse: Decodable {
+    public struct ErrorDetail: Decodable {
+        public let code: String
+        public let message: String
+    }
+    public let error: ErrorDetail
+}
+
+// MARK: - Helpers
+
+public struct AnyEncodable: Encodable {
+    private let encode: (Encoder) throws -> Void
+
+    public init<T: Encodable>(_ value: T) {
+        self.encode = value.encode
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try encode(encoder)
+    }
+}
+
+extension JSONEncoder {
+    static let akp: JSONEncoder = {
+        let e = JSONEncoder()
+        e.keyEncodingStrategy = .convertToSnakeCase
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+}
+
+extension JSONDecoder {
+    static let akp: JSONDecoder = {
+        let d = JSONDecoder()
+        d.keyDecodingStrategy = .convertFromSnakeCase
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+}
+```
+
+---
+
+## SwiftUI Integration
+
+Create a complete chat view with streaming:
+
+```swift
+// ChatView.swift
+import SwiftUI
+
+struct ChatView: View {
+    @StateObject private var vm = ChatViewModel()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(vm.messages) { msg in
+                            MessageBubble(message: msg)
+                                .id(msg.id)
+                        }
+                        if vm.isStreaming {
+                            StreamingBubble(text: vm.streamingText)
+                                .id("streaming")
+                        }
+                    }
+                    .padding()
+                }
+                .onChange(of: vm.streamingText) {
+                    proxy.scrollTo("streaming", anchor: .bottom)
+                }
+            }
+
+            Divider()
+
+            HStack {
+                TextField("Ask anything...", text: $vm.inputText, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...5)
+                    .disabled(vm.isStreaming)
+
+                Button {
+                    Task { await vm.send() }
+                } label: {
+                    Image(systemName: vm.isStreaming ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(vm.isStreaming ? .red : .indigo)
+                }
+                .disabled(vm.inputText.isEmpty && !vm.isStreaming)
+            }
+            .padding()
+        }
+        .navigationTitle("AI Assistant")
+    }
+}
+
+@MainActor
+final class ChatViewModel: ObservableObject {
+    @Published var messages: [ChatMessage] = []
+    @Published var inputText = ""
+    @Published var isStreaming = false
+    @Published var streamingText = ""
+
+    private let client = AKPClient(
+        baseURL: URL(string: "https://your-kernel.example.com")!,
+        apiKey: "your-api-key"
+    )
+    private var streamTask: Task<Void, Never>?
+
+    func send() async {
+        guard !inputText.isEmpty || isStreaming else { return }
+
+        if isStreaming {
+            streamTask?.cancel()
+            isStreaming = false
+            return
+        }
+
+        let userText = inputText
+        inputText = ""
+        messages.append(.init(role: .user, content: userText))
+        isStreaming = true
+        streamingText = ""
+
+        streamTask = Task {
+            do {
+                let request = ProviderRequest(
+                    messages: messages.map { Message(role: $0.role.rawValue, content: $0.content) },
+                    temperature: 0.7,
+                    maxTokens: 2048
+                )
+
+                for try await chunk in client.stream(request: request) {
+                    guard !Task.isCancelled else { break }
+                    if chunk.type == .contentDelta, let delta = chunk.delta {
+                        streamingText += delta
+                    }
+                }
+
+                if !streamingText.isEmpty {
+                    messages.append(.init(role: .assistant, content: streamingText))
+                }
+            } catch {
+                if !Task.isCancelled {
+                    messages.append(.init(role: .assistant, content: "Error: \(error.localizedDescription)"))
+                }
+            }
+
+            isStreaming = false
+            streamingText = ""
+        }
+    }
+}
+
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    enum Role: String { case user, assistant }
+    let role: Role
+    let content: String
+}
+
+struct MessageBubble: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 48) }
+            Text(message.content)
+                .padding(12)
+                .background(message.role == .user ? Color.indigo : Color(.secondarySystemBackground))
+                .foregroundStyle(message.role == .user ? .white : .primary)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+            if message.role == .assistant { Spacer(minLength: 48) }
+        }
+    }
+}
+
+struct StreamingBubble: View {
+    let text: String
+
+    var body: some View {
+        HStack {
+            (Text(text) + Text("▊").foregroundStyle(.indigo))
+                .padding(12)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+            Spacer(minLength: 48)
+        }
+    }
+}
+```
+
+---
+
+## Swift Package Manager
+
+Create `Package.swift` if distributing the Swift client as a package:
+
+```swift
+// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "AKPSwiftClient",
+    platforms: [
+        .iOS(.v16),
+        .macOS(.v13),
+        .watchOS(.v9),
+        .tvOS(.v16),
+    ],
+    products: [
+        .library(name: "AKP", targets: ["AKP"]),
+    ],
+    targets: [
+        .target(
+            name: "AKP",
+            path: "Sources/AKP"
+        ),
+        .testTarget(
+            name: "AKPTests",
+            dependencies: ["AKP"],
+            path: "Tests/AKPTests"
+        ),
+    ]
+)
+```
+
+---
+
+<Snippet file="footer.mdx" />

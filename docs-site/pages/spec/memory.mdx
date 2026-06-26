@@ -1,0 +1,315 @@
+---
+title: "Memory Primitive"
+description: "The H2O tiered memory system — Hot, Warm, and Cold storage for AI context and long-term recall."
+icon: "brain"
+---
+
+## The H2O Principle
+
+AKP's memory model is based on **thermal tiers**, inspired by thermodynamic heat — the hotter the memory, the faster and more expensive it is to read and write. Every piece of information stored by an AKP kernel flows through this hierarchy automatically.
+
+```
+   ┌─────────────────────────────────────────────────────────┐
+   │                     AKP MEMORY H2O                     │
+   │                                                         │
+   │   🔴 HOT          🟡 WARM          🔵 COLD             │
+   │   ─────────       ──────────       ──────────           │
+   │   In-process      Redis /          PostgreSQL /         │
+   │   RAM / Map       Memcached        S3 / Pinecone        │
+   │                                                         │
+   │   < 1ms latency   1–50ms latency   50–500ms latency     │
+   │   ~8K tokens      ~100K tokens     Unlimited            │
+   │   Process TTL     Configurable     Persistent           │
+   │                                                         │
+   │   ← fast, expensive                 slow, cheap →       │
+   └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Core Types
+
+```typescript
+import type {
+  MemoryEntry,
+  MemoryTier,
+  MemoryWriteOptions,
+  MemoryReadOptions,
+  MemorySearchOptions,
+  MemorySearchResult,
+} from "@avant-dev/akp-core";
+
+type MemoryTier = "hot" | "warm" | "cold";
+
+interface MemoryEntry<T = unknown> {
+  key: string;
+  value: T;
+  tier: MemoryTier;
+  metadata?: Record<string, unknown>;
+  tags?: string[];
+  createdAt: Date;
+  expiresAt?: Date;
+  accessCount: number;
+  lastAccessedAt: Date;
+  // Embedding vector for semantic search (auto-generated if RAG is configured)
+  embedding?: number[];
+}
+
+interface MemoryWriteOptions<T = unknown> {
+  tier: MemoryTier;
+  key: string;
+  value: T;
+  ttl?: number;              // Seconds. Omit for persistent.
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  // Auto-promote to "hot" if access frequency exceeds this threshold
+  hotPromotionThreshold?: number;
+}
+
+interface MemoryReadOptions {
+  key: string;
+  tiers?: MemoryTier[];     // Tiers to search, in order. Default: ["hot", "warm", "cold"]
+}
+
+interface MemorySearchOptions {
+  query: string;             // Semantic query (requires RAG/embedder)
+  tiers?: MemoryTier[];
+  tags?: string[];
+  limit?: number;            // Default: 10
+  minScore?: number;         // Minimum cosine similarity (0–1)
+  metadata?: Record<string, unknown>; // Exact-match metadata filter
+}
+```
+
+---
+
+## Operations
+
+### Write
+
+```typescript
+// Write to warm (session-level) memory
+await kernel.memory.write({
+  tier: "warm",
+  key: "session:abc123:last-intent",
+  value: { intent: "book_flight", destination: "Mexico City", date: "2025-03-15" },
+  ttl: 1800,  // 30 minutes
+  tags: ["session", "intent"],
+});
+
+// Write to cold (permanent) memory
+await kernel.memory.write({
+  tier: "cold",
+  key: "user:42:profile",
+  value: {
+    name: "Erick González Aguilar",
+    language: "es",
+    timezone: "America/Mexico_City",
+    preferences: { verbosity: "concise", units: "metric" },
+  },
+  // No TTL — persists indefinitely
+  tags: ["user", "profile"],
+});
+
+// Write to hot memory (in-process, ultra-fast)
+await kernel.memory.write({
+  tier: "hot",
+  key: "turn:xyz:working-memory",
+  value: { extractedEntities: ["Mexico City", "flight", "March 15"] },
+  ttl: 60,  // 1 minute
+});
+```
+
+### Read
+
+```typescript
+// Simple read (searches hot → warm → cold by default)
+const entry = await kernel.memory.read<{ intent: string }>({
+  key: "session:abc123:last-intent",
+});
+
+if (entry) {
+  console.log(entry.value.intent);  // "book_flight"
+  console.log(entry.tier);          // "warm" (where it was found)
+}
+
+// Read from specific tiers only
+const hotEntry = await kernel.memory.read({
+  key: "turn:xyz:working-memory",
+  tiers: ["hot"],
+});
+```
+
+### Semantic Search
+
+AKP Memory supports **semantic (vector) search** when a RAG embedder is configured. This lets you find memories by meaning, not just exact key matching.
+
+```typescript
+// Find memories semantically related to a query
+const results = await kernel.memory.search({
+  query: "What does the user prefer for travel?",
+  tiers: ["warm", "cold"],
+  tags: ["user", "preference"],
+  limit: 5,
+  minScore: 0.7,
+});
+
+for (const result of results) {
+  console.log(`${result.entry.key} (score: ${result.score.toFixed(3)})`);
+  console.log(result.entry.value);
+}
+```
+
+### Delete and Expire
+
+```typescript
+// Delete a specific key from all tiers
+await kernel.memory.delete({ key: "session:abc123:last-intent" });
+
+// Delete from a specific tier only
+await kernel.memory.delete({ key: "user:42:profile", tier: "cold" });
+
+// Delete all entries with a tag
+await kernel.memory.deleteByTag({ tag: "session", tier: "warm" });
+
+// Invalidate all warm memory for a session
+await kernel.memory.deleteByPattern({ pattern: "session:abc123:*", tier: "warm" });
+```
+
+---
+
+## Automatic Tier Promotion
+
+AKP tracks access frequency and **automatically promotes** frequently-accessed entries from colder tiers to warmer ones:
+
+```typescript
+const kernel = createKernel({
+  memory: {
+    hot: { maxTokens: 8192 },
+    warm: { adapter: "redis", url: process.env.REDIS_URL! },
+    cold: { adapter: "postgres", url: process.env.DATABASE_URL! },
+    // Promotion rules
+    promotion: {
+      // Promote from cold → warm after 3 accesses in 1 hour
+      coldToWarm: { accessesIn: { count: 3, windowSecs: 3600 } },
+      // Promote from warm → hot after 5 accesses in 5 minutes
+      warmToHot: { accessesIn: { count: 5, windowSecs: 300 } },
+    },
+    // Demotion rules
+    demotion: {
+      // Demote from hot → warm after 2 minutes of no access
+      hotToWarm: { idleSecs: 120 },
+      // Demote from warm → cold after 1 hour of no access
+      warmToCold: { idleSecs: 3600 },
+    },
+  },
+});
+```
+
+---
+
+## Context Window Integration
+
+AKP Memory integrates with the Provider primitive to automatically populate context windows from memory tiers before each LLM call:
+
+```typescript
+const response = await kernel.provider.complete({
+  messages: [{ role: "user", content: "Remind me of my travel preferences." }],
+  // Inject memory into context automatically
+  memoryInjection: {
+    enabled: true,
+    tiers: ["hot", "warm"],
+    // Semantic search for relevant memories
+    query: "travel preferences",
+    maxEntries: 5,
+    maxTokens: 2048,
+    // Where to inject: "system" | "before_last_user" | "after_system"
+    placement: "before_last_user",
+  },
+});
+```
+
+---
+
+## Memory Configuration
+
+```typescript
+import { createKernel } from "@avant-dev/akp-core";
+
+const kernel = createKernel({
+  memory: {
+    hot: {
+      maxTokens: 8192,           // Max tokens stored in hot memory
+      maxEntries: 1000,          // Max number of keys
+    },
+    warm: {
+      adapter: "redis",
+      url: process.env.REDIS_URL!,
+      ttl: 3600,                 // Default TTL (seconds)
+      keyPrefix: "akp:warm:",   // Redis key prefix
+      // Or use Upstash Redis:
+      // adapter: "upstash-redis",
+      // restUrl: process.env.UPSTASH_REDIS_REST_URL!,
+      // restToken: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    },
+    cold: {
+      adapter: "postgres",
+      url: process.env.DATABASE_URL!,
+      table: "akp_memory",       // Table name
+      // Or use S3-compatible storage:
+      // adapter: "s3",
+      // bucket: "my-akp-memory",
+      // region: "us-east-1",
+    },
+  },
+});
+```
+
+---
+
+## Wire Format
+
+### `POST /v1/memory/write`
+
+```json
+{
+  "tier": "warm",
+  "key": "session:abc123:last-intent",
+  "value": { "intent": "book_flight" },
+  "ttl": 1800,
+  "tags": ["session"]
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "key": "session:abc123:last-intent",
+  "tier": "warm",
+  "expiresAt": "2025-01-15T14:30:00Z"
+}
+```
+
+### `GET /v1/memory/read?key=session:abc123:last-intent&tiers=hot,warm`
+
+Response:
+
+```json
+{
+  "found": true,
+  "entry": {
+    "key": "session:abc123:last-intent",
+    "value": { "intent": "book_flight" },
+    "tier": "warm",
+    "createdAt": "2025-01-15T14:00:00Z",
+    "expiresAt": "2025-01-15T14:30:00Z",
+    "accessCount": 3
+  }
+}
+```
+
+---
+
+<Snippet file="footer.mdx" />

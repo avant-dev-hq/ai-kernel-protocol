@@ -1,0 +1,243 @@
+---
+title: "Environment Variables"
+description: "Complete reference for all AKP kernel environment variables."
+icon: "gear"
+---
+
+## Overview
+
+AKP reads configuration from environment variables when not provided explicitly in code. This page documents every supported variable with defaults and examples.
+
+<Note>
+  Variables marked **Required** must be set for the kernel to start. All others have sensible defaults.
+</Note>
+
+---
+
+## Provider Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | If using Anthropic | — | Anthropic API secret key. Format: `sk-ant-api03-...` |
+| `OPENAI_API_KEY` | If using OpenAI | — | OpenAI API secret key. Format: `sk-proj-...` |
+| `MISTRAL_API_KEY` | If using Mistral | — | Mistral API key |
+| `DEEPSEEK_API_KEY` | If using DeepSeek | — | DeepSeek API key |
+| `AKP_DEFAULT_PROVIDER` | No | `"anthropic"` | Primary provider. One of: `anthropic`, `openai`, `mistral`, `deepseek` |
+| `AKP_DEFAULT_MODEL` | No | Provider default | Override the default model globally |
+| `AKP_PROVIDER_TIMEOUT_MS` | No | `30000` | Provider request timeout in milliseconds |
+| `AKP_PROVIDER_MAX_RETRIES` | No | `3` | Maximum retry attempts per provider |
+| `AKP_ROUTING_STRATEGY` | No | `"primary-with-fallback"` | Routing strategy: `primary-with-fallback`, `cost-optimized`, `latency-optimized`, `round-robin` |
+| `AKP_FALLBACK_PROVIDERS` | No | All configured | Comma-separated fallback provider names: `"openai,mistral"` |
+
+```bash
+# Minimal — Anthropic only
+ANTHROPIC_API_KEY=sk-ant-api03-...
+
+# Multi-provider with fallback
+ANTHROPIC_API_KEY=sk-ant-api03-...
+OPENAI_API_KEY=sk-proj-...
+AKP_DEFAULT_PROVIDER=anthropic
+AKP_FALLBACK_PROVIDERS=openai
+AKP_ROUTING_STRATEGY=primary-with-fallback
+```
+
+---
+
+## Memory Variables
+
+### Hot Memory
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_MEMORY_HOT_MAX_TOKENS` | `8192` | Maximum tokens stored in hot (in-process) memory |
+| `AKP_MEMORY_HOT_MAX_ENTRIES` | `1000` | Maximum number of keys in hot memory |
+
+### Warm Memory (Redis)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `REDIS_URL` | If warm enabled | — | Redis connection URL. Format: `redis://[:password@]host[:port][/db]` |
+| `AKP_REDIS_KEY_PREFIX` | No | `"akp:warm:"` | Prefix for all warm memory keys |
+| `AKP_MEMORY_WARM_TTL` | No | `3600` | Default TTL for warm entries (seconds) |
+| `AKP_MEMORY_WARM_ADAPTER` | No | `"redis"` | Warm adapter: `redis` or `upstash-redis` |
+| `UPSTASH_REDIS_REST_URL` | If using Upstash | — | Upstash Redis REST URL |
+| `UPSTASH_REDIS_REST_TOKEN` | If using Upstash | — | Upstash Redis REST token |
+
+```bash
+# Self-hosted Redis
+REDIS_URL=redis://localhost:6379
+
+# Redis with auth
+REDIS_URL=redis://:mypassword@redis.internal:6379/0
+
+# Upstash (serverless Redis)
+AKP_MEMORY_WARM_ADAPTER=upstash-redis
+UPSTASH_REDIS_REST_URL=https://[id].upstash.io
+UPSTASH_REDIS_REST_TOKEN=AX...
+
+# Railway Redis (auto-provided)
+REDIS_URL=${{Redis.REDIS_URL}}
+```
+
+### Cold Memory (PostgreSQL)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | If cold enabled | — | PostgreSQL connection URL |
+| `AKP_MEMORY_COLD_TABLE` | No | `"akp_memory"` | Table name for cold memory |
+| `AKP_MEMORY_COLD_ADAPTER` | No | `"postgres"` | Cold adapter: `postgres`, `sqlite`, `s3` |
+| `AKP_S3_BUCKET` | If using S3 | — | S3 bucket name for cold memory |
+| `AKP_S3_REGION` | If using S3 | — | AWS region |
+| `AWS_ACCESS_KEY_ID` | If using S3 | — | AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | If using S3 | — | AWS secret key |
+
+```bash
+# PostgreSQL (most common)
+DATABASE_URL=postgresql://<user>:<password>@localhost:5432/akp
+
+# Neon (serverless PostgreSQL)
+DATABASE_URL=postgresql://<user>:<password>@ep-xxx.us-east-1.aws.neon.tech/akp?sslmode=require
+
+# Supabase
+DATABASE_URL=postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres
+
+# Railway PostgreSQL (auto-provided)
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+```
+
+### Memory Promotion/Demotion
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_MEMORY_PROMOTE_COLD_TO_WARM_ACCESSES` | `3` | Accesses before promoting cold → warm |
+| `AKP_MEMORY_PROMOTE_COLD_TO_WARM_WINDOW_SECS` | `3600` | Window for counting cold accesses |
+| `AKP_MEMORY_PROMOTE_WARM_TO_HOT_ACCESSES` | `5` | Accesses before promoting warm → hot |
+| `AKP_MEMORY_PROMOTE_WARM_TO_HOT_WINDOW_SECS` | `300` | Window for counting warm accesses |
+| `AKP_MEMORY_DEMOTE_HOT_TO_WARM_IDLE_SECS` | `120` | Idle seconds before demoting hot → warm |
+| `AKP_MEMORY_DEMOTE_WARM_TO_COLD_IDLE_SECS` | `3600` | Idle seconds before demoting warm → cold |
+
+---
+
+## RAG Variables
+
+### Embedder
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_RAG_EMBEDDER_PROVIDER` | `"openai"` | Embedding provider: `openai`, `cohere` |
+| `AKP_RAG_EMBEDDER_MODEL` | `"text-embedding-3-small"` | Embedding model |
+| `AKP_RAG_EMBEDDER_DIMENSIONS` | `1536` | Embedding dimensions (must match vector store) |
+| `AKP_RAG_EMBEDDER_BATCH_SIZE` | `100` | Documents per embedding API call |
+| `COHERE_API_KEY` | If using Cohere | — | Cohere API key (for embeddings and reranking) |
+
+### Vector Store
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AKP_RAG_VECTOR_ADAPTER` | No | `"pgvector"` | Vector store: `pgvector`, `pinecone`, `qdrant`, `chroma`, `weaviate`, `memory` |
+| `AKP_RAG_PGVECTOR_TABLE` | No | `"akp_embeddings"` | pgvector table name |
+| `AKP_RAG_PGVECTOR_INDEX_TYPE` | No | `"ivfflat"` | pgvector index type: `ivfflat` or `hnsw` |
+| `PINECONE_API_KEY` | If using Pinecone | — | Pinecone API key |
+| `AKP_PINECONE_INDEX` | If using Pinecone | — | Pinecone index name |
+| `AKP_PINECONE_NAMESPACE` | No | `"default"` | Pinecone namespace |
+| `QDRANT_URL` | If using Qdrant | — | Qdrant server URL |
+| `QDRANT_API_KEY` | No | — | Qdrant API key (for Qdrant Cloud) |
+| `AKP_QDRANT_COLLECTION` | If using Qdrant | — | Qdrant collection name |
+
+### Chunking
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_RAG_CHUNK_STRATEGY` | `"recursive"` | Chunking strategy: `fixed`, `recursive`, `semantic`, `markdown` |
+| `AKP_RAG_CHUNK_SIZE` | `512` | Target chunk size in tokens |
+| `AKP_RAG_CHUNK_OVERLAP` | `64` | Chunk overlap in tokens |
+
+### Reranker
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_RAG_RERANKER_PROVIDER` | — (disabled) | Reranker: `cohere`, `voyageai` |
+| `AKP_RAG_RERANKER_MODEL` | Provider default | Reranker model |
+| `AKP_RAG_RERANKER_TOP_N` | `5` | Number of results after reranking |
+| `VOYAGE_API_KEY` | If using VoyageAI | — | VoyageAI API key |
+
+---
+
+## Server Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | HTTP server port |
+| `HOST` | `"0.0.0.0"` | HTTP server bind address |
+| `AKP_SECRET_KEY` | — | Primary API secret key for authentication. Generate with `openssl rand -hex 32` |
+| `AKP_ALLOWED_KEYS` | Value of `AKP_SECRET_KEY` | Comma-separated list of valid API keys |
+| `AKP_CORS_ORIGIN` | `"*"` | CORS allowed origins. Use `"*"` for public APIs or specific origins for private |
+| `AKP_RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window in milliseconds |
+| `AKP_RATE_LIMIT_MAX` | `1000` | Maximum requests per window per API key |
+| `AKP_LOG_LEVEL` | `"info"` | Logging level: `debug`, `info`, `warn`, `error` |
+
+---
+
+## MCP Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AKP_MCP_ENABLED` | `false` | Enable MCP compatibility endpoint |
+| `AKP_MCP_PATH` | `"/mcp"` | MCP endpoint path |
+| `AKP_MCP_EXPOSE_MEMORY` | `false` | Expose memory tiers as MCP Resources |
+
+---
+
+## Observability Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | Enable OpenTelemetry instrumentation |
+| `OTEL_SERVICE_NAME` | `"akp-kernel"` | Service name for traces and metrics |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP exporter endpoint (e.g., Jaeger, Honeycomb) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | — | OTLP headers (e.g., API key) |
+
+```bash
+# Example: send traces to Honeycomb
+OTEL_ENABLED=true
+OTEL_SERVICE_NAME=my-akp-kernel
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=your-api-key
+```
+
+---
+
+## Complete Example `.env`
+
+```bash
+# ── Providers ──────────────────────────────────────────────
+ANTHROPIC_API_KEY=sk-ant-api03-...
+OPENAI_API_KEY=sk-proj-...
+AKP_DEFAULT_PROVIDER=anthropic
+AKP_ROUTING_STRATEGY=primary-with-fallback
+AKP_FALLBACK_PROVIDERS=openai
+
+# ── Memory ─────────────────────────────────────────────────
+REDIS_URL=redis://localhost:6379
+DATABASE_URL=postgresql://localhost:5432/akp
+
+# ── RAG ────────────────────────────────────────────────────
+# Uses DATABASE_URL for pgvector
+COHERE_API_KEY=...    # For reranking
+
+# ── Server ─────────────────────────────────────────────────
+PORT=8080
+AKP_SECRET_KEY=change-me-in-production-use-openssl-rand-hex-32
+AKP_CORS_ORIGIN=https://myapp.example.com
+
+# ── MCP ────────────────────────────────────────────────────
+AKP_MCP_ENABLED=true
+
+# ── Observability ──────────────────────────────────────────
+OTEL_ENABLED=true
+OTEL_SERVICE_NAME=my-kernel
+```
+
+---
+
+<Snippet file="footer.mdx" />
