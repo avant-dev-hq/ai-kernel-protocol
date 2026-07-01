@@ -2,17 +2,18 @@ import { Router } from 'express';
 import { streamText, generateText } from 'ai';
 import type { CoreMessage } from 'ai';
 import { getModelTier } from '../lib/provider.js';
+import type { ModelTier } from '../lib/provider.js';
 import { buildTools } from '../tools/index.js';
 import { getContextWindow, addMessage } from '../lib/memory.js';
 const router = Router();
 const SYS = `You are an AI intelligence assistant. Be precise, helpful, and actionable. Today: ${new Date().toISOString().split('T')[0]}.`;
 router.post('/', async (req, res) => {
-  const { messages, session_id, tier='standard', provider, tools: rt, system, stream=true, max_steps=5 } = req.body as { messages:CoreMessage[]; session_id?:string; tier?:'fast'|'standard'|'advanced'; provider?:string; tools?:string[]; system?:string; stream?:boolean; max_steps?:number; };
+  const { messages, session_id, tier='standard', provider, tools: rt, system, stream=true, max_steps=5 } = req.body as { messages:CoreMessage[]; session_id?:string; tier?:keyof ModelTier; provider?:string; tools?:string[]; system?:string; stream?:boolean; max_steps?:number; };
   if (!Array.isArray(messages)||!messages.length) return res.status(400).json({error:'messages required'});
   try {
     let all: CoreMessage[] = messages;
-    if (session_id) { const h=await getContextWindow(session_id,40); all=[...h.map(m=>({role:m.role as CoreMessage['role'],content:m.content})),...messages]; }
-    const mdls=getModelTier(provider); const model=((mdls as Record<string,unknown>)[tier] as typeof mdls.standard)??mdls.standard;
+    if (session_id) { const h=await getContextWindow(session_id,40); all=[...h.map(m=>({role:m.role as CoreMessage['role'],content:m.content} as CoreMessage)),...messages]; }
+    const mdls=getModelTier(provider); const model=(mdls[tier as keyof ModelTier])??mdls.standard;
     const tools=buildTools(rt) as Parameters<typeof streamText>[0]['tools'];
     const sys=system??SYS;
     if (stream) {
@@ -22,7 +23,7 @@ router.post('/', async (req, res) => {
       for await (const c of result.fullStream) {
         if (c.type==='text-delta'){txt+=c.textDelta;res.write(`data: ${JSON.stringify({type:'text',delta:c.textDelta})}\n\n`);}
         else if (c.type==='tool-call') res.write(`data: ${JSON.stringify({type:'tool_call',name:c.toolName})}\n\n`);
-        else if (c.type==='tool-result') res.write(`data: ${JSON.stringify({type:'tool_result',name:c.toolName})}\n\n`);
+        else if ((c as {type:string}).type==='tool-result') { const tc=c as unknown as {toolName:string}; res.write(`data: ${JSON.stringify({type:'tool_result',name:tc.toolName})}\n\n`); }
         else if (c.type==='finish') u=(c as {usage:typeof u}).usage??u;
       }
       if (session_id&&txt) { const lu=[...messages].reverse().find(m=>m.role==='user'); if (lu) await addMessage({session_id,role:'user',content:typeof lu.content==='string'?lu.content:JSON.stringify(lu.content)}).catch(()=>{}); await addMessage({session_id,role:'assistant',content:txt,tokens_used:u.promptTokens+u.completionTokens}).catch(()=>{}); }
