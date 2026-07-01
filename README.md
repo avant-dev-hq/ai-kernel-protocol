@@ -53,7 +53,7 @@ AKP defines the molecule. Change `AI_PROVIDER` — that's it. Zero code changes.
 
 ```bash
 AI_PROVIDER=anthropic   # → Claude Haiku/Sonnet/Opus
-AI_PROVIDER=mistral     # → Mistral Small/Large
+AI_PROVIDER=mistral     # → Mistral Small/Large (European sovereign option)
 AI_PROVIDER=deepseek    # → DeepSeek Chat/Reasoner
 AI_PROVIDER=openai      # → GPT-4o Mini/4o
 ```
@@ -153,13 +153,51 @@ The reference implementation is proprietary. This repository defines the open sp
 
 ## Why This Exists
 
-AKP was designed by **Erick González Aguilar** (Avant.Dev, Mexico City) to fulfill a concrete need: AI intelligence infrastructure for organizations in developing countries that cannot afford provider lock-in.
+AKP was designed by **Erick González Aguilar** (Avant.Dev, Mexico City) to answer a question that technical specifications rarely ask:
+
+**What does a person earning $2 a day need from artificial intelligence?**
+
+Not a chatbot. Not a subscription. Not a registration form.
+
+They need the same answer a $200/hour lawyer gives someone in Manhattan — in their language, on the device they already own, at the moment they need it, for free.
+
+AKP is the infrastructure that makes that possible.
+
+---
+
+## The Real Scope
 
 Avant.Dev holds [ITU Partner2Connect Pledge #7528](docs/p2c-pledge.md) — validated May 15, 2026, active in:
 
 **Argentina · Barbados · Brazil · Chile · Colombia · Guatemala · Jamaica · Mexico · Panama · Venezuela**
 
-For practitioners in these countries, provider agnosticism is not a preference — it is a requirement for sovereign, cost-effective, resilient AI. When bilateral decisions can suspend frontier model access overnight, the architecture of independence is not idealism. It is engineering.
+The formal ITU pledge metric is 27,079. The real addressable population is different:
+
+| Country | People in precarious informality |
+|---------|----------------------------------|
+| 🇲🇽 Mexico | ~35M |
+| 🇧🇷 Brazil | ~90M |
+| 🇨🇴 Colombia | ~20M |
+| 🇦🇷 Argentina | ~12M |
+| 🇨🇱 Chile | ~8M |
+| 🇬🇹 Guatemala | ~10M |
+| 🇯🇲 Jamaica | ~800K |
+| 🇵🇦 Panama | ~1M |
+| 🇻🇪 Venezuela | ~15M |
+| 🇧🇧 Barbados | ~200K |
+| **Total** | **~300M** |
+
+These are street vendors, day laborers, domestic workers, rural families, artisans, musicians, informal entrepreneurs — people excluded from formal legal systems, unable to afford lawyers or accountants, navigating government bureaucracy alone at night on a borrowed phone.
+
+They are not edge cases. They are the majority.
+
+**The architecture:**
+- Interface: WhatsApp — the device they already have
+- Engine: AKP — sovereign, provider-agnostic, zero lock-in
+- Deployer: cooperatives, municipalities, cultural centers, IDB programs
+- Cost to end user: **zero. always.**
+
+For institutions deploying AKP to serve these communities, provider agnosticism is not a preference — it is a requirement. When bilateral decisions can suspend frontier model access overnight, the architecture of independence is not idealism. It is survival infrastructure.
 
 → See [docs/p2c-pledge.md](docs/p2c-pledge.md) for the full policy commitment and addendum.
 
@@ -168,7 +206,7 @@ For practitioners in these countries, provider agnosticism is not a preference �
 ## License
 
 | Use | License |
-|-----|---------|
+|-----|----------|
 | Personal / research / education | ✅ Free + attribution |
 | Open-source implementation | ✅ Free + attribution + same license |
 | Internal enterprise | ✅ Free + attribution |
