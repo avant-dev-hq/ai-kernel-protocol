@@ -1,0 +1,21 @@
+# Nixpacks configuration for AI Kernel Protocol
+# Railway build: nodejs_20 + npm
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["npm install"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "node dist/index.js"
+
+# Explicitly list ONLY the env vars needed at BUILD time.
+# Runtime secrets (KERNEL_API_KEY, DATABASE_URL, etc.) are injected
+# by Railway at deploy — they must NOT be baked into the image.
+# This resolves the SecretsUsedInArgOrEnv Docker lint warning.
+[variables]
+NODE_ENV = "production"
