@@ -6,6 +6,7 @@
 [![License: AKP v1.0](https://img.shields.io/badge/License-AKP%20v1.0-blue.svg)](LICENSE)
 [![Spec Version](https://img.shields.io/badge/Spec-0.1.0-green.svg)](SPEC.md)
 [![Author](https://img.shields.io/badge/Author-Erick%20Gonz%C3%A1lez%20Aguilar-black.svg)](https://avant.dev)
+[![ITU P2C](https://img.shields.io/badge/ITU%20P2C-Pledge%20%237528-009cde.svg)](docs/p2c-pledge.md)
 
 ---
 
@@ -122,7 +123,8 @@ ai-kernel-protocol/
 └── docs/
     ├── introduction.md
     ├── mcp-relationship.md
-    └── quickstart.md
+    ├── quickstart.md
+    └── p2c-pledge.md    — ITU P2C #7528 policy commitment & addendum
 ```
 
 ---
@@ -153,11 +155,13 @@ The reference implementation is proprietary. This repository defines the open sp
 
 AKP was designed by **Erick González Aguilar** (Avant.Dev, Mexico City) to fulfill a concrete need: AI intelligence infrastructure for organizations in developing countries that cannot afford provider lock-in.
 
-Avant.Dev holds [ITU Partner2Connect Pledge #7528](https://www.itu.int/partner2connect/) — active in:
+Avant.Dev holds [ITU Partner2Connect Pledge #7528](docs/p2c-pledge.md) — validated May 15, 2026, active in:
 
-**Mexico · Colombia · Brazil · Argentina · Chile · Peru · Ecuador · Costa Rica · Dominican Republic · Panama**
+**Argentina · Barbados · Brazil · Chile · Colombia · Guatemala · Jamaica · Mexico · Panama · Venezuela**
 
-For practitioners in these countries, provider agnosticism is not a preference — it is a requirement for sovereign, cost-effective, resilient AI.
+For practitioners in these countries, provider agnosticism is not a preference — it is a requirement for sovereign, cost-effective, resilient AI. When bilateral decisions can suspend frontier model access overnight, the architecture of independence is not idealism. It is engineering.
+
+→ See [docs/p2c-pledge.md](docs/p2c-pledge.md) for the full policy commitment and addendum.
 
 ---
 
@@ -176,5 +180,5 @@ For practitioners in these countries, provider agnosticism is not a preference �
 ---
 
 **Designed and authored by Erick González Aguilar**  
-[Avant.Dev](https://avant.dev) · Mexico City · [ITU P2C Pledge #7528](https://www.itu.int/partner2connect/)  
+[Avant.Dev](https://avant.dev) · Mexico City · [ITU P2C Pledge #7528](docs/p2c-pledge.md)  
 © 2026 Erick González Aguilar. All rights reserved.
