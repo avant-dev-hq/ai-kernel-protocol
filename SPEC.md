@@ -154,5 +154,5 @@ Version negotiation via `AKP-Version` HTTP header (optional in v0.1, required fr
 ---
 
 *Designed by Erick González Aguilar · Avant.Dev · Mexico City*  
-*ITU P2C Pledge #7528 — Mexico · Colombia · Brazil · Argentina · Chile · Peru · Ecuador · Costa Rica · Dominican Republic · Panama*  
+*ITU P2C Pledge #7528 — Argentina · Barbados · Brazil · Chile · Colombia · Guatemala · Jamaica · Mexico · Panama · Venezuela*  
 *© 2026 Erick González Aguilar. All rights reserved.*
